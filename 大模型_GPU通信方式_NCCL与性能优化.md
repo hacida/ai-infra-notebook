@@ -58,8 +58,8 @@ Rank 是通信组内参与者的编号，不应直接理解为物理 GPU 编号�
 点对点通信只涉及明确的一对发送方与接收方：
 
 $$
-\operatorname{Send}(r_i\rightarrow r_j,\;X),\qquad
-\operatorname{Recv}(r_j\leftarrow r_i,\;X).
+\text{Send}(r_i\rightarrow r_j,\;X),\qquad
+\text{Recv}(r_j\leftarrow r_i,\;X).
 $$
 
 例如流水线并行中，负责前几层的 GPU 把激活值发送给下一阶段。发送方和接收方必须匹配，数据类型、元素数量等也要符合接口约定。复杂的多对多模式可以由多组 Send/Recv 组成。
@@ -122,7 +122,7 @@ $$
 All-Gather 后，每个 Rank 都拥有按 Rank 顺序拼接的：
 
 $$
-Y=\operatorname{Concat}(X_0,X_1,X_2,X_3)
+Y=\text{Concat}(X_0,X_1,X_2,X_3)
  =[1,2,3,4,5,6,7,8].
 $$
 

@@ -343,13 +343,13 @@ $$
 方差为：
 
 $$
-\operatorname{Var}(q_i k_j^\top)=d_k
+\text{Var}(q_i k_j^\top)=d_k
 $$
 
 因此，点积的标准差为：
 
 $$
-\operatorname{Std}(q_i k_j^\top)=\sqrt{d_k}
+\text{Std}(q_i k_j^\top)=\sqrt{d_k}
 $$
 
 随着维度增大，点积数值的波动也会变大。
@@ -357,7 +357,7 @@ $$
 接下来还要经过 Softmax：
 
 $$
-\alpha_{ij}=\operatorname{softmax}_j(s_{ij})
+\alpha_{ij}=\text{softmax}_j(s_{ij})
 $$
 
 如果输入数值过大，Softmax 容易出现某个位置的概率接近 1，其他位置接近 0 的情况。
@@ -367,7 +367,7 @@ $$
 因此，Transformer 使用缩放点积：
 
 $$
-\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
+\text{Attention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
 $$
 
 其中 $\sqrt{d_k}$ 就是缩放因子。
@@ -419,7 +419,7 @@ Transformer 将输入分别映射到多个不同的 Q、K、V 空间。
 第 $r$ 个头的计算为：
 
 $$
-\operatorname{head}_r=\operatorname{Attention}(XW_r^Q,XW_r^K,XW_r^V)
+\text{head}_r=\text{Attention}(XW_r^Q,XW_r^K,XW_r^V)
 $$
 
 每个头都有自己独立的可训练参数。
@@ -427,13 +427,13 @@ $$
 最后，将所有头的结果拼接：
 
 $$
-H=\operatorname{Concat}(\operatorname{head}_1,\ldots,\operatorname{head}_h)
+H=\text{Concat}(\text{head}_1,\ldots,\text{head}_h)
 $$
 
 再经过一个线性变换：
 
 $$
-\operatorname{MultiHead}(X)=HW^O
+\text{MultiHead}(X)=HW^O
 $$
 
 其中：
@@ -518,7 +518,7 @@ $$
 公式如下：
 
 $$
-\operatorname{PE}_{(p,2i)}=\sin\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right),\qquad \operatorname{PE}_{(p,2i+1)}=\cos\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right)
+\text{PE}_{(p,2i)}=\sin\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right),\qquad \text{PE}_{(p,2i+1)}=\cos\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right)
 $$
 
 其中：
@@ -558,13 +558,13 @@ $$
 位置编码为：
 
 $$
-\operatorname{PE}\in\mathbb{R}^{n\times d_{\text{model}}}
+\text{PE}\in\mathbb{R}^{n\times d_{\text{model}}}
 $$
 
 Transformer 直接将二者相加：
 
 $$
-X_{\text{input}}=E_{\text{token}}+\operatorname{PE}
+X_{\text{input}}=E_{\text{token}}+\text{PE}
 $$
 
 这里不是拼接，而是逐元素相加。
@@ -579,7 +579,7 @@ $$
 因此，更完整的输入形式为：
 
 $$
-X_{\text{input}}=\sqrt{d_{\text{model}}}\,E_{\text{token}}+\operatorname{PE}
+X_{\text{input}}=\sqrt{d_{\text{model}}}\,E_{\text{token}}+\text{PE}
 $$
 
 ![不同频率的位置编码与 Token 表示相加](images/transform/raster/10-positional-encoding.png)
@@ -605,7 +605,7 @@ $$
 原始 Transformer 使用一个两层全连接神经网络：
 
 $$
-\operatorname{FFN}(x)=\max(0,xW_1+b_1)W_2+b_2
+\text{FFN}(x)=\max(0,xW_1+b_1)W_2+b_2
 $$
 
 其中：
@@ -619,13 +619,13 @@ $$
 第二层：
 
 $$
-y=\operatorname{ReLU}(u)W_2+b_2,\qquad W_2\in\mathbb{R}^{d_{\text{ff}}\times d_{\text{model}}}
+y=\text{ReLU}(u)W_2+b_2,\qquad W_2\in\mathbb{R}^{d_{\text{ff}}\times d_{\text{model}}}
 $$
 
 ReLU 函数：
 
 $$
-\operatorname{ReLU}(a)=\max(0,a)
+\text{ReLU}(a)=\max(0,a)
 $$
 
 在 Base 模型中：
@@ -640,7 +640,7 @@ $512\rightarrow2048\rightarrow512$。
 整个过程就是：
 
 $$
-x\rightarrow xW_1+b_1\rightarrow\operatorname{ReLU}\rightarrow\operatorname{ReLU}(xW_1+b_1)W_2+b_2
+x\rightarrow xW_1+b_1\rightarrow\text{ReLU}\rightarrow\text{ReLU}(xW_1+b_1)W_2+b_2
 $$
 
 ### 6.2 为什么要先升维，再降维？
@@ -727,7 +727,7 @@ $$
 再通过可训练参数进行缩放和平移：
 
 $$
-\operatorname{LayerNorm}(x)_r=\gamma_r\widehat{x}_r+\beta_r
+\text{LayerNorm}(x)_r=\gamma_r\widehat{x}_r+\beta_r
 $$
 
 其中：
@@ -745,7 +745,7 @@ $$
 也就是先进行残差相加，再执行 LayerNorm：
 
 $$
-\operatorname{AddNorm}(x,\operatorname{Sublayer})=\operatorname{LayerNorm}\!\left(x+\operatorname{Sublayer}(x)\right)
+\text{AddNorm}(x,\text{Sublayer})=\text{LayerNorm}\!\left(x+\text{Sublayer}(x)\right)
 $$
 
 这个公式在原始 Transformer 中非常重要。
@@ -757,13 +757,13 @@ $$
 第一个：
 
 $$
-a=\operatorname{LayerNorm}\!\left(x+\operatorname{MultiHead}(x)\right)
+a=\text{LayerNorm}\!\left(x+\text{MultiHead}(x)\right)
 $$
 
 第二个：
 
 $$
-y=\operatorname{LayerNorm}\!\left(a+\operatorname{FFN}(a)\right)
+y=\text{LayerNorm}\!\left(a+\text{FFN}(a)\right)
 $$
 
 最终：
@@ -814,31 +814,31 @@ $$
 计算：
 
 $$
-M=\operatorname{MultiHead}(X)
+M=\text{MultiHead}(X)
 $$
 
 然后残差连接和归一化：
 
 $$
-A=\operatorname{LayerNorm}(X+M)
+A=\text{LayerNorm}(X+M)
 $$
 
 **第二个子层：Feed Forward Network**
 
 $$
-F=\operatorname{FFN}(A)
+F=\text{FFN}(A)
 $$
 
 然后：
 
 $$
-Y=\operatorname{LayerNorm}(A+F)
+Y=\text{LayerNorm}(A+F)
 $$
 
 因此，一个 Encoder Layer 可以总结为：
 
 $$
-X\rightarrow\operatorname{MultiHeadSelfAttention}\rightarrow\operatorname{AddNorm}\rightarrow\operatorname{FFN}\rightarrow\operatorname{AddNorm}
+X\rightarrow\text{MultiHeadSelfAttention}\rightarrow\text{AddNorm}\rightarrow\text{FFN}\rightarrow\text{AddNorm}
 $$
 
 其中：
@@ -880,7 +880,7 @@ Decoder 的任务是逐个生成目标 Token。
 数学上：
 
 $$
-M_{ij}=\begin{cases}0,&j\leq i,\\-\infty,&j>i,\end{cases}\qquad \operatorname{MaskedAttention}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
+M_{ij}=\begin{cases}0,&j\leq i,\\-\infty,&j>i,\end{cases}\qquad \text{MaskedAttention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
 $$
 
 其中：
@@ -932,7 +932,7 @@ Key 和 Value 来自 Encoder。
 计算：
 
 $$
-\operatorname{CrossAttention}(D,E)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
+\text{CrossAttention}(D,E)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
 $$
 
 然后执行残差连接和 LayerNorm。
@@ -946,27 +946,27 @@ $$
 最后仍然使用与 Encoder 相同形式的 FFN：
 
 $$
-F=\operatorname{FFN}(C)
+F=\text{FFN}(C)
 $$
 
 并执行：
 
 $$
-D_{\text{out}}=\operatorname{LayerNorm}(C+F)
+D_{\text{out}}=\text{LayerNorm}(C+F)
 $$
 
 因此，一个 Decoder Layer 可以概括为：
 
 $$
-U=\operatorname{LayerNorm}(D+\operatorname{MaskedMultiHead}(D))
+U=\text{LayerNorm}(D+\text{MaskedMultiHead}(D))
 $$
 
 $$
-C=\operatorname{LayerNorm}(U+\operatorname{MultiHeadCross}(U,E))
+C=\text{LayerNorm}(U+\text{MultiHeadCross}(U,E))
 $$
 
 $$
-D_{\text{out}}=\operatorname{LayerNorm}(C+\operatorname{FFN}(C))
+D_{\text{out}}=\text{LayerNorm}(C+\text{FFN}(C))
 $$
 
 6 层 Decoder 依次堆叠，得到最终的解码结果。
@@ -1099,7 +1099,7 @@ $$
 原始论文使用 Adam 优化器，并设计了特殊的学习率调度策略：
 
 $$
-\operatorname{lr}(s)=d_{\text{model}}^{-1/2}\min\!\left(s^{-1/2},\,s\,w^{-3/2}\right)
+\text{lr}(s)=d_{\text{model}}^{-1/2}\min\!\left(s^{-1/2},\,s\,w^{-3/2}\right)
 $$
 
 其中：
@@ -1115,7 +1115,7 @@ $$
 **第一阶段：Warmup**
 
 $$
-\operatorname{lr}(s)=d_{\text{model}}^{-1/2}s\,w^{-3/2}\qquad(s\leq w)
+\text{lr}(s)=d_{\text{model}}^{-1/2}s\,w^{-3/2}\qquad(s\leq w)
 $$
 
 随着训练步数增加，学习率逐渐增大。
@@ -1123,7 +1123,7 @@ $$
 **第二阶段：Decay**
 
 $$
-\operatorname{lr}(s)=d_{\text{model}}^{-1/2}s^{-1/2}\qquad(s\geq w)
+\text{lr}(s)=d_{\text{model}}^{-1/2}s^{-1/2}\qquad(s\geq w)
 $$
 
 达到预热阶段后，学习率逐渐衰减。
@@ -1251,37 +1251,37 @@ $$
 **2. Scaled Dot-Product Attention**
 
 $$
-\operatorname{Attention}(Q,K,V)=\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
+\text{Attention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
 $$
 
 **3. Multi-Head Attention**
 
 $$
-\operatorname{MultiHead}(X)=\operatorname{Concat}(\operatorname{head}_1,\ldots,\operatorname{head}_h)W^O
+\text{MultiHead}(X)=\text{Concat}(\text{head}_1,\ldots,\text{head}_h)W^O
 $$
 
 **4. Positional Encoding**
 
 $$
-\operatorname{PE}_{(p,2i)}=\sin\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right),\quad \operatorname{PE}_{(p,2i+1)}=\cos\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right)
+\text{PE}_{(p,2i)}=\sin\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right),\quad \text{PE}_{(p,2i+1)}=\cos\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right)
 $$
 
 **5. Feed Forward Network**
 
 $$
-\operatorname{FFN}(x)=\max(0,xW_1+b_1)W_2+b_2
+\text{FFN}(x)=\max(0,xW_1+b_1)W_2+b_2
 $$
 
 **6. 原始 Transformer 的 Add & Norm**
 
 $$
-\operatorname{LayerNorm}(x+\operatorname{Sublayer}(x))
+\text{LayerNorm}(x+\text{Sublayer}(x))
 $$
 
 **7. Masked Attention**
 
 $$
-\operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
+\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
 $$
 
 **8. 训练目标**

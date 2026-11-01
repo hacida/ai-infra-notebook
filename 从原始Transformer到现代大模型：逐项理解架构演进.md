@@ -11,7 +11,7 @@
 | 整体架构 | Encoder–Decoder | Encoder-only、Decoder-only，以及保留 Encoder–Decoder 的 T5 类模型 | 匹配理解、生成或条件生成任务 |
 | Attention 头 | 每个 Query 头配自己的 Key/Value 头，即 MHA | MQA、GQA、MLA | 减少自回归生成时的 KV 读取或存储 |
 | 位置 | 输入加绝对正弦编码 | 学习式绝对位置、相对位置 Bias、RoPE、ALiBi | 让 Attention 更直接表达位置关系，适应不同长度 |
-| FFN | $\operatorname{ReLU}(xW_1+b_1)W_2+b_2$ | GELU、GEGLU、SwiGLU、MoE | 改进非线性表达，或扩张总参数而保持稀疏计算 |
+| FFN | $\text{ReLU}(xW_1+b_1)W_2+b_2$ | GELU、GEGLU、SwiGLU、MoE | 改进非线性表达，或扩张总参数而保持稀疏计算 |
 | 归一化 | Post-Norm LayerNorm | Pre-Norm LayerNorm、Pre-Norm RMSNorm | 改善深层训练的梯度传播；简化归一化计算 |
 | 生成状态 | 原论文主要说明自回归解码 | KV Cache、Prefix 复用、分组或压缩 KV | 避免反复计算历史 K/V，缓解长上下文显存与带宽压力 |
 
@@ -42,7 +42,7 @@ $$
 把提示词和待生成内容放进**同一条序列**。位置 $t$ 只能读取不晚于 $t$ 的位置：
 
 $$
-\operatorname{score}_{t,j}=\frac{q_t k_j^\top}{\sqrt{d_k}}+M_{t,j},\qquad
+\text{score}_{t,j}=\frac{q_t k_j^\top}{\sqrt{d_k}}+M_{t,j},\qquad
 M_{t,j}=\begin{cases}0,&j\le t,\\-\infty,&j>t.\end{cases}
 $$
 
@@ -94,7 +94,7 @@ $$
 
 $$
 o_t^{(a)}=\sum_{j\le t}\alpha_{t,j}^{(a)}v_j^{(a)},\qquad
-\alpha_{t,j}^{(a)}=\operatorname{softmax}_{j}\!\left(
+\alpha_{t,j}^{(a)}=\text{softmax}_{j}\!\left(
 \frac{q_t^{(a)}\cdot k_j^{(a)}}{\sqrt d}+M_{t,j}\right).
 $$
 
@@ -107,7 +107,7 @@ $$
 Multi-Query Attention（MQA）保持 $h_q=h$ 个不同 Query 头，却令 $h_{kv}=1$。四头例子变为 $Q_1,Q_2,Q_3,Q_4$ 都访问同一份历史 $K/V$：
 
 $$
-o_t^{(a)}=\sum_{j\le t}\operatorname{softmax}_{j}\!\left(
+o_t^{(a)}=\sum_{j\le t}\text{softmax}_{j}\!\left(
 \frac{q_t^{(a)}\cdot k_j}{\sqrt d}+M_{t,j}\right)v_j.
 $$
 
@@ -120,7 +120,7 @@ $$
 Grouped-Query Attention（GQA）处于两者之间。它把 $h_q$ 个 Query 头分成 $h_{kv}$ 组，每组配一份 K/V。四个 Query 头、两个 KV 组时，$Q_1,Q_2$ 共用 $K_1/V_1$，$Q_3,Q_4$ 共用 $K_2/V_2$。设 $g(a)$ 是头 $a$ 所在组，公式只是把 MHA 的同编号 K/V 换成组编号：
 
 $$
-o_t^{(a)}=\sum_{j\le t}\operatorname{softmax}_{j}\!\left(
+o_t^{(a)}=\sum_{j\le t}\text{softmax}_{j}\!\left(
 \frac{q_t^{(a)}\cdot k_j^{(g(a))}}{\sqrt d}+M_{t,j}\right)v_j^{(g(a))}.
 $$
 
@@ -232,7 +232,7 @@ Mistral 7B 结合 GQA 与 Sliding Window Attention；Longformer 还把局部窗�
 T5 使用按相对距离分桶的可学习 Bias。对 Query 位置 $i$、Key 位置 $j$，可以写成：
 
 $$
-s_{ij}^{(a)}=\frac{q_i^{(a)}k_j^{(a)\top}}{\sqrt{d_k}}+b_{\operatorname{bucket}(i,j)}^{(a)}+M_{ij}.
+s_{ij}^{(a)}=\frac{q_i^{(a)}k_j^{(a)\top}}{\sqrt{d_k}}+b_{\text{bucket}(i,j)}^{(a)}+M_{ij}.
 $$
 
 模型无需仅从 $x_i+p_i$ 和 $x_j+p_j$ 中推断距离；Bias 明确进入 Softmax 前的分数。分桶让接近的位置区分更细，远距离可合并表示；它不意味着模型在桶外自动拥有无限精确的位置分辨率。[T5 论文](https://arxiv.org/abs/1910.10683)
@@ -273,24 +273,24 @@ Attention 让 Token 彼此交换信息；FFN 在每个 Token 的隐藏维上独�
 
 ### 4.1 普通 Dense FFN：换激活函数
 
-原始 FFN 的主要形式是 $\operatorname{FFN}(x)=W_2\operatorname{ReLU}(W_1x+b_1)+b_2$。后来的模型常用 GELU，它的负值区间是平滑衰减而非 ReLU 的硬截断。改变激活函数通常不改变“先扩张隐藏维，再投回模型维”的基本结构，也不改变每个 Token 都经过同一套 FFN 权重这一事实。
+原始 FFN 的主要形式是 $\text{FFN}(x)=W_2\text{ReLU}(W_1x+b_1)+b_2$。后来的模型常用 GELU，它的负值区间是平滑衰减而非 ReLU 的硬截断。改变激活函数通常不改变“先扩张隐藏维，再投回模型维”的基本结构，也不改变每个 Token 都经过同一套 FFN 权重这一事实。
 
 ### 4.2 门控 FFN：GEGLU 与 SwiGLU
 
 门控结构将输入投影成**值分支**和**门分支**，逐元素相乘后再投回原维：
 
 $$
-\operatorname{GatedFFN}(x)=W_o\bigl[\phi(W_gx)\odot(W_ux)\bigr].
+\text{GatedFFN}(x)=W_o\bigl[\phi(W_gx)\odot(W_ux)\bigr].
 $$
 
-$\phi=\operatorname{GELU}$ 常称 GEGLU；$\phi=\operatorname{SiLU}$（也称 Swish 的常用形式）常称 SwiGLU。$W_g$ 决定各中间通道如何被调节，$W_u$ 提供要被调节的值。它不是“把 ReLU 换成 SiLU”那么简单，而是从两次线性映射变为三次投影加逐元素乘法。若要在相近参数预算下比较，门控中间维不能机械地照搬普通 FFN 的 $4H$。模型的实际宽度还应以论文或配置为准。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
+$\phi=\text{GELU}$ 常称 GEGLU；$\phi=\text{SiLU}$（也称 Swish 的常用形式）常称 SwiGLU。$W_g$ 决定各中间通道如何被调节，$W_u$ 提供要被调节的值。它不是“把 ReLU 换成 SiLU”那么简单，而是从两次线性映射变为三次投影加逐元素乘法。若要在相近参数预算下比较，门控中间维不能机械地照搬普通 FFN 的 $4H$。模型的实际宽度还应以论文或配置为准。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
 
 ### 4.3 MoE：把一套 FFN 换成可选择的多套 Expert
 
 Mixture of Experts（MoE）在某些层把 Dense FFN 换成 $E$ 个 Expert（通常各自是 FFN）。Router 对每个 Token 产生分数，选择 $k$ 个 Expert：
 
 $$
-\mathcal T(x)=\operatorname{TopK}(r(x),k),\qquad
+\mathcal T(x)=\text{TopK}(r(x),k),\qquad
 y(x)=\sum_{e\in\mathcal T(x)}g_e(x)E_e(x).
 $$
 
@@ -309,13 +309,13 @@ MoE 的代价来自 Router 负载不均、跨卡 Token Dispatch、Expert 批量�
 对一个子层 $F$，原始 Transformer 的 Post-Norm 是：
 
 $$
-y=\operatorname{LN}(x+F(x)).
+y=\text{LN}(x+F(x)).
 $$
 
 Pre-Norm 则先归一化再送入子层：
 
 $$
-y=x+F(\operatorname{Norm}(x)).
+y=x+F(\text{Norm}(x)).
 $$
 
 ![Post-Norm 和 Pre-Norm 的残差与归一化顺序](images/transformer-evolution/03-post-pre-norm.png)
@@ -327,8 +327,8 @@ $$
 一个 Pre-Norm 的 Attention + FFN Block 可写为：
 
 $$
-u=x+\operatorname{Attention}(\operatorname{Norm}_1(x)),\qquad
-y=u+\operatorname{FFN}(\operatorname{Norm}_2(u)).
+u=x+\text{Attention}(\text{Norm}_1(x)),\qquad
+y=u+\text{FFN}(\text{Norm}_2(u)).
 $$
 
 注意第二个 Norm 的输入是 **Attention 残差相加后的 $u$**，不是原始的 $x$。也不要把“Pre-Norm”误认为“整个模型只在最开始做一次 Norm”；每个子层前仍有自己的归一化。
@@ -340,13 +340,13 @@ $$
 $$
 \mu=\frac1H\sum_jx_j,\quad
 \sigma^2=\frac1H\sum_j(x_j-\mu)^2,\quad
-\operatorname{LN}(x)_i=\gamma_i\frac{x_i-\mu}{\sqrt{\sigma^2+\epsilon}}+\beta_i.
+\text{LN}(x)_i=\gamma_i\frac{x_i-\mu}{\sqrt{\sigma^2+\epsilon}}+\beta_i.
 $$
 
 RMSNorm 不减均值，只用均方根调整尺度：
 
 $$
-\operatorname{RMSNorm}(x)_i=\gamma_i
+\text{RMSNorm}(x)_i=\gamma_i
 \frac{x_i}{\sqrt{\frac1H\sum_jx_j^2+\epsilon}}.
 $$
 
@@ -361,9 +361,9 @@ KV Cache 是**自回归推理的执行状态**，不是另一个训练好的 Att
 生成第 $t$ 个新 Token 时，因果 Attention 只能看到前缀。如果每一步都把整个前缀重新送入模型，历史 Token 的 K/V 会反复由同一层的隐藏状态计算。缓存后，Prefill 先为 Prompt 的每一层写入历史 K/V；Decode 每步只为新 Token 产生本步的 K/V，追加到对应层的 Cache，再让新 Query 读取截至当前的历史 Cache。
 
 $$
-K_{\le t}=\operatorname{Concat}(K_{<t},k_t),\quad
-V_{\le t}=\operatorname{Concat}(V_{<t},v_t),\quad
-o_t=\operatorname{softmax}\!\left(\frac{q_tK_{\le t}^{\top}}{\sqrt{d_k}}\right)V_{\le t}.
+K_{\le t}=\text{Concat}(K_{<t},k_t),\quad
+V_{\le t}=\text{Concat}(V_{<t},v_t),\quad
+o_t=\text{softmax}\!\left(\frac{q_tK_{\le t}^{\top}}{\sqrt{d_k}}\right)V_{\le t}.
 $$
 
 这里省掉的是**历史 K/V 的重复投影和历史位置的重复前向计算**；新 Token 仍要读取历史 K/V 做 Attention，读取量会随上下文增长。KV Cache 不使每步 Attention 成本变成常数。
@@ -411,9 +411,9 @@ Prefix Cache 复用相同前缀的已计算状态；Paged KV Cache 改善缓存�
 一个典型 Llama Block 的抽象顺序是：
 
 $$
-u=x+\operatorname{CausalAttention}_{\mathrm{RoPE,GQA}}
-\bigl(\operatorname{RMSNorm}(x)\bigr),\qquad
-y=u+\operatorname{SwiGLU}\bigl(\operatorname{RMSNorm}(u)\bigr).
+u=x+\text{CausalAttention}_{\mathrm{RoPE,GQA}}
+\bigl(\text{RMSNorm}(x)\bigr),\qquad
+y=u+\text{SwiGLU}\bigl(\text{RMSNorm}(u)\bigr).
 $$
 
 这个式子同时展示五件事：只有 Decoder；Attention 有因果掩码；RoPE 作用于内部 Q/K；GQA 改变 Q 与 KV 头的对应关系；两个子层都采用 Pre-Norm，FFN 是 Dense SwiGLU。实际模型配置中的头数和位置扩展方法要按具体版本核对。训练时整个序列可并行计算各位置的损失；推理时按 Token 逐步生成并维护 KV Cache。[Llama 2 论文](https://arxiv.org/abs/2307.09288)、[Llama 3 论文](https://arxiv.org/abs/2407.21783)
