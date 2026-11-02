@@ -321,7 +321,22 @@ Attention 让 Token 彼此交换信息；FFN 在每个 Token 的隐藏维上独�
 
 ### 4.1 普通 Dense FFN：换激活函数
 
-原始 FFN 的主要形式是 $\text{FFN}(x)=W_2\text{ReLU}(W_1x+b_1)+b_2$。后来的模型常用 GELU，它的负值区间是平滑衰减而非 ReLU 的硬截断。改变激活函数通常不改变“先扩张隐藏维，再投回模型维”的基本结构，也不改变每个 Token 都经过同一套 FFN 权重这一事实。
+原始 FFN 对每个 Token 的向量 $x\in\mathbb R^H$ 做同一套变换：
+
+$$
+z=W_1x+b_1\in\mathbb R^{D},\qquad
+\text{FFN}(x)=W_2\text{ReLU}(z)+b_2\in\mathbb R^H.
+$$
+
+通常 $D>H$。先扩维，给不同中间通道学习不同特征，再投回模型维；序列中所有 Token 共用 $W_1,W_2$，但输入不同，输出自然不同。ReLU 对 $z<0$ 的通道直接输出 0，对 $z>0$ 原样通过。其优点是简单；代价是阈值附近不平滑，负值侧没有渐进的保留空间。
+
+GELU 把门限改成随输入连续变化的权重：
+
+$$
+\text{GELU}(z)=z\,\Phi(z),
+$$
+
+其中 $\Phi$ 是标准正态分布的累积分布函数。比如 $z=-1$ 时，ReLU 输出 0，GELU 约为 $-0.159$；$z=1$ 时，GELU 约为 $0.841$。这说明它不是简单地“只保留正数”，而是平滑地调节通道贡献。**换激活函数没有改变 FFN 的连接方式**：仍是两次投影、所有 Token 共用一套权重，计算量仍主要来自两个矩阵乘法。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
 
 ### 4.2 门控 FFN：GEGLU 与 SwiGLU
 
@@ -331,7 +346,9 @@ $$
 \text{GatedFFN}(x)=W_o\bigl[\phi(W_gx)\odot(W_ux)\bigr].
 $$
 
-$\phi=\text{GELU}$ 常称 GEGLU；$\phi=\text{SiLU}$（也称 Swish 的常用形式）常称 SwiGLU。$W_g$ 决定各中间通道如何被调节，$W_u$ 提供要被调节的值。它不是“把 ReLU 换成 SiLU”那么简单，而是从两次线性映射变为三次投影加逐元素乘法。若要在相近参数预算下比较，门控中间维不能机械地照搬普通 FFN 的 $4H$。模型的实际宽度还应以论文或配置为准。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
+$\phi=\text{GELU}$ 常称 GEGLU；$\phi=\text{SiLU}$（$\text{SiLU}(z)=z\,\sigma(z)$）常称 SwiGLU。可按三个动作读公式：$W_ux$ 生成要传递的值；$\phi(W_gx)$ 为每个中间通道计算调节系数；两者逐元素相乘，再经 $W_o$ 合成输出。门的值并非只能取 0 或 1，也可能为负，因此“门控”表示连续调节，不能理解为硬开关。
+
+为何需要额外的值分支？普通 FFN 的每个中间通道只由本通道激活后的数值决定；门控结构让一条投影的结果调制另一条投影的结果，形成更丰富的逐元素交互。代价是多一次大矩阵投影。忽略偏置时，普通 FFN 的主要参数量约为 $2HD$，门控 FFN 约为 $3HD_g$。若原本 $D=4H$，为了接近相同参数预算，可取 $D_g\approx 2D/3=8H/3$，而不是继续取 $4H$。这是预算推算，不是所有模型必须使用的宽度；实际效果还要看训练与具体配置。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
 
 ### 4.3 MoE：把一套 FFN 换成可选择的多套 Expert
 
@@ -343,6 +360,10 @@ y(x)=\sum_{e\in\mathcal T(x)}g_e(x)E_e(x).
 $$
 
 若 $E=8,k=2$，一个 Token 只运行两个选中的 Expert，而模型存有八套 Expert 参数。这使**总参数量**和**每 Token 激活的参数/计算量**不再同比增加。不能把“8 个 Expert”理解为“推理只需存 2 个 Expert”：不同 Token 的选择不同，服务仍需容纳可被路由到的权重。也不能把 “8×7B” 简单乘成总参数，因为 Attention 等非 Expert 参数通常是共享的。
+
+按一次前向传播来看，先由 Router 为当前 Token 算出 $E$ 个路由分数；再挑出 Top-$k$；把这个 Token 的表示交给选中的 Expert；最后用门控权重合并 Expert 输出。假设分数排序为 $e_2>e_5>e_1$，且 $k=2$，则本次只执行 $E_2(x),E_5(x)$；下一个 Token 可能选中完全不同的一对。这与上一节的 SwiGLU 不同：SwiGLU 在**同一个 FFN 内调节中间通道**，MoE 在**多套 FFN 之间选择计算路径**。两者也可叠加，Expert 自身可以采用门控 FFN。
+
+这里的“稀疏”主要指 Expert 计算。Router 仍需打分，公共 Attention 仍要运行；总权重仍需存放或在设备间分布。若大量 Token 都选同一 Expert，该 Expert 会拥塞，其他 Expert 闲置。因此实际训练/服务还要处理负载均衡、每个 Expert 的容量以及跨设备发送 Token 的成本；增大 Expert 数不会自动带来等比例吞吐提升。
 
 MoE 的代价来自 Router 负载不均、跨卡 Token Dispatch、Expert 批量大小和训练稳定性。Mixtral 使用每 Token top-2 的稀疏专家；Switch Transformer 探索 top-1；DeepSeekMoE 还引入更细粒度的专家与共享 Expert 等设计。具体是否丢弃超容量 Token、如何平衡负载，依实现而异。[Mixtral 论文](https://arxiv.org/abs/2401.04088)、[Switch Transformer 论文](https://arxiv.org/abs/2101.03961)、[DeepSeekMoE 论文](https://arxiv.org/abs/2401.06066)
 
@@ -370,7 +391,18 @@ $$
 
 两条路径的区别在于 Norm 位于残差相加之后还是子层计算之前；图中 $F$ 代表 Attention 或 FFN 子层。
 
-看残差主路径：Pre-Norm 的加法让 $x$ 到 $y$ 有一个直接的恒等路径；Post-Norm 的加法之后还经过归一化。这有助于理解为什么 Pre-Norm 通常更容易在深层模型中稳定优化。它并不保证任意深度都无训练问题，也不能单凭这一条判断最终模型质量。两种安排在具体训练配方下都可能工作。[LayerNorm 位置分析论文](https://arxiv.org/abs/2002.04745)
+先看前向信息流。Pre-Norm 让原输入 $x$ 不经改写就进入残差加法，子层只提供增量 $F(\text{Norm}(x))$；Post-Norm 则先把增量与输入相加，再把总和归一化。两者即使用同一个 LayerNorm、同一个 Attention，得到的函数也不相同。
+
+反向传播时，Pre-Norm 的直通路径也更容易看清。把梯度写成雅可比矩阵，局部上有：
+
+$$
+\frac{\partial y_{\text{pre}}}{\partial x}
+=I+J_FJ_{\text{Norm}},\qquad
+\frac{\partial y_{\text{post}}}{\partial x}
+=J_{\text{Norm}}(I+J_F).
+$$
+
+Pre-Norm 式子中有显式的恒等项 $I$；Post-Norm 的残差梯度仍要经过 Norm 的导数。多层叠加时，这个路径差别会影响初始化阶段的梯度。已有分析发现，所研究设置下 Post-LN 的靠近输出层梯度可能较大，学习率 warm-up 对其更关键；Pre-LN 的初始化梯度更容易控制。**这只是解释训练稳定性的一个机制**，并不保证任意深度都稳定，也不能单凭 Norm 顺序判断最终质量。[LayerNorm 位置分析论文](https://arxiv.org/abs/2002.04745)
 
 一个 Pre-Norm 的 Attention + FFN Block 可写为：
 
@@ -400,13 +432,21 @@ $$
 
 两者都通常沿**单个 Token 的隐藏维**计算，而不是在不同 Token 之间求全局均值。RMSNorm 少了中心化这一步，但“少一步”不自动推出任何硬件上固定的加速比例。Llama 2 采用 Pre-Norm RMSNorm；原始 Transformer 是 Post-Norm LayerNorm。T5 则有自己的归一化实现，不能仅因它是 Pre-Norm 就说它与 Llama 完全一样。[RMSNorm 论文](https://arxiv.org/abs/1910.07467)、[Llama 2 论文](https://arxiv.org/abs/2307.09288)
 
+一个二维小例子能看出差别。先忽略 $\epsilon$，设 $\gamma=1,\beta=0$，输入 $x=[1,3]$：LayerNorm 减去均值 2，再除以标准差 1，得到 $[-1,1]$；RMSNorm 用均方根 $\sqrt5$ 缩放，得到 $[1/\sqrt5,3/\sqrt5]$。如果把两个分量都加 10，LayerNorm 的结果仍是 $[-1,1]$，RMSNorm 的结果会变化。前者同时消除整体平移与尺度变化；后者主要控制尺度，保留均值信息。这就是 RMSNorm 简化计算时选择放弃的性质。[RMSNorm 论文](https://arxiv.org/abs/1910.07467)
+
+读模型配置时要做两个独立判断：**Pre/Post 决定 Norm 在残差块中的位置；LayerNorm/RMSNorm 决定这个 Norm 对向量做什么运算。** “Pre-Norm RMSNorm”是两个选择的组合，不是一种不可拆开的新算子。
+
 ## 六、KV Cache 怎样改变推理：缓存历史，而不是改变模型参数
 
 KV Cache 是**自回归推理的执行状态**，不是另一个训练好的 Attention 机制。它与 MHA/GQA/MLA 可以组合：后者决定要缓存哪些形状的数据，Cache 决定不重复计算历史数据。
 
 ### 6.1 不缓存会重复什么？
 
-生成第 $t$ 个新 Token 时，因果 Attention 只能看到前缀。如果每一步都把整个前缀重新送入模型，历史 Token 的 K/V 会反复由同一层的隐藏状态计算。缓存后，Prefill 先为 Prompt 的每一层写入历史 K/V；Decode 每步只为新 Token 产生本步的 K/V，追加到对应层的 Cache，再让新 Query 读取截至当前的历史 Cache。
+先区分两个阶段。**Prefill** 把完整 Prompt 一次送入模型；因果掩码保证每个位置只能使用自己及以前的 Token，同时为每一层得到 Prompt 的 K/V。**Decode** 已知全部前缀，每一步只输入一个刚生成的新 Token，并预测再下一个 Token。
+
+例如 Prompt 是 $A,B,C$。Prefill 在某层保存 $K_A,V_A,K_B,V_B,K_C,V_C$。模型生成 $D$ 后，下一步只需由 $D$ 的该层表示计算 $q_D,k_D,v_D$，把 $k_D,v_D$ 追加到 Cache；$q_D$ 与 $A$ 到 $D$ 的 K 比较，再对对应 V 求加权和。每一层都重复这个过程。之所以可以复用旧 K/V，是因为因果掩码让历史位置的表示**不依赖后来出现的 Token**；模型权重、历史前缀和位置条件保持相同时，历史 K/V 不会因 $D$ 到来而改变。
+
+如果不用 Cache，每生成一个 Token 都把增长后的完整前缀重新送入模型，历史位置的投影和各层前向会反复计算。有了 Cache，当前步只算新位置的隐藏状态：
 
 $$
 K_{\le t}=\text{Concat}(K_{<t},k_t),\quad
@@ -414,7 +454,7 @@ V_{\le t}=\text{Concat}(V_{<t},v_t),\quad
 o_t=\text{softmax}\!\left(\frac{q_tK_{\le t}^{\top}}{\sqrt{d_k}}\right)V_{\le t}.
 $$
 
-这里省掉的是**历史 K/V 的重复投影和历史位置的重复前向计算**；新 Token 仍要读取历史 K/V 做 Attention，读取量会随上下文增长。KV Cache 不使每步 Attention 成本变成常数。
+这里省掉的是**历史位置的重复前向计算**，不只是少做一次 K/V 投影；当前 Query 仍要读取可见历史的 K/V 做 Attention。对于全量因果 Attention，单步读取量随上下文长度增长，缓存本身也随生成长度增长，因此 KV Cache 不让单步成本变成常数。对于滑动窗口等有限可见范围机制，增长规律还取决于具体窗口与缓存实现。
 
 ![Prefill 写入历史 KV，Decode 追加当前 KV 并复用历史](images/transformer-evolution/04-kv-cache.png)
 
@@ -430,15 +470,17 @@ $$
 
 $L$ 为层数，$B$ 为并发序列数，$S$ 为当前缓存长度，$h_{kv}$ 为 KV 头数，$d_k$ 为每头维度，$b$ 为每元素字节数。式子未计分配碎片、页表、对齐、量化元数据、滑动窗口及并行分片。例：$L=32,B=1,S=4096,h_{kv}=8,d_k=128,b=2$ 时，约 $512$ MiB；同形状 MHA 若 $h_{kv}=32$，约 $2$ GiB。这个**仅是 KV 部分**，不是总显存。
 
+这个算例也说明两种优化如何配合：**Cache** 让历史计算只做一次；**GQA** 让每个历史位置需要存和读取的 KV 头更少。前者改善重复计算，后者改善 Cache 容量与带宽压力。MLA 进一步改变所存的表示，不能直接把上式中的 $h_{kv}$ 改小来估算 MLA；要按其 latent 与位置分量的实际存储形状计算。显存节约也要结合权重、激活、并发数和分配器开销看。
+
 ### 6.3 Encoder–Decoder 的 Cache 与 Decoder-only 有何不同？
 
-Encoder–Decoder 推理也可缓存 Decoder 的历史 Self-Attention K/V。Cross-Attention 的 K/V 来自**固定的 Encoder 输出**，通常可为给定源序列计算一次并在生成多个目标 Token 时复用。两类 Cache 的来源和增长方式不同：前者随目标长度增长，后者主要随源长度决定。
+Encoder–Decoder 推理有两种来源不同的可复用状态。Decoder 的**Self-Attention K/V** 来自已生成的目标前缀，每生成一个目标 Token 就追加一次；**Cross-Attention K/V** 来自固定的 Encoder 输出，给定源序列后可计算一次，在整个目标生成过程中复用。前者的长度随目标增长，后者主要由源长度决定。不能把两者合并成“Decoder 只有一份 KV Cache”，否则会混淆 Query 从哪里来、K/V 从哪里来。
 
 Prefix Cache 复用相同前缀的已计算状态；Paged KV Cache 改善缓存的分配与管理；KV 量化减少字节数。这些主要是**推理系统设计**，不应与 GQA 或 RoPE 这样的模型结构变化混为一谈。是否能复用还取决于模型版本、Token 序列、位置、注意力掩码等是否一致。
 
 ## 七、按模型架构重新串起这些变化
 
-前六节是“零件表”。现在把零件放回具体的 Block，检查信息流是否一致。下表仅列**代表性公开模型**，同一系列内不同版本、尺寸可能不完全相同。
+前六节分别解释了模型的可见范围、Attention、位置、FFN、Norm 和推理状态。现在沿着**一个输入如何穿过模型**来重组它们：先确定 Token 可以读取哪些上下文，再看每个 Block 如何交换信息和变换特征，最后看生成时要留下哪些状态。下表仅列**代表性公开模型**，同一系列内不同版本、尺寸可能不完全相同。
 
 | 模型/路线 | 整体结构 | Attention/位置 | FFN | Norm | 推理时的关键状态 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -452,31 +494,41 @@ Prefix Cache 复用相同前缀的已计算状态；Paged KV Cache 改善缓存�
 
 ### 7.1 T5：保留 Encoder–Decoder，但改训练和位置信息
 
-读 T5 的一层时，先画清三条数据路径：Encoder 的双向 Self-Attention；Decoder 的因果 Self-Attention；Decoder 从 Encoder 输出读取信息的 Cross-Attention。相对位置 Bias 进入 Attention 分数，而不是简单替代源序列内容。Pre-Norm 改的是残差块内部路径。T5 最有代表性的变化是把大量文本任务统一为“输入文本 → 输出文本”，不能因为后来 Decoder-only 普及就认为 Encoder–Decoder 已失去作用。[T5 论文](https://arxiv.org/abs/1910.10683)
+假设任务是把源句翻译成目标句。先把**完整源句**交给 Encoder：每个源 Token 可通过双向 Self-Attention 汇集源句上下文，得到一列 Encoder 输出。生成目标句时，Decoder 的因果 Self-Attention 只能看已生成的目标前缀；随后 Cross-Attention 让当前目标 Query 从固定的 Encoder 输出取信息。这解释了为何它有两套不同的 Attention 上下文：一套随目标长度增长，一套来自已读完的源句。
+
+T5 在这种结构里把位置关系作为相对 Bias 加到 Attention 分数，把 Norm 放到子层计算之前；这些变化分别解决**如何表示距离**和**如何训练残差块**，并没有取消 Encoder 与 Cross-Attention。训练时，T5 又把多种任务统一成“输入文本 → 输出文本”的形式。读模型时先追踪源和目标数据流，再看每个 Attention 内部如何加 Bias，才不会把整体架构和局部算子混在一起。[T5 论文](https://arxiv.org/abs/1910.10683)
 
 ### 7.2 Llama：Dense Decoder-only 的一组组合
 
 一个典型 Llama Block 的抽象顺序是：
 
 $$
-u=x+\text{CausalAttention}_{\mathrm{RoPE,GQA}}
+u=x+\text{CausalAttention}_{\mathrm{RoPE,MHA/GQA}}
 \bigl(\text{RMSNorm}(x)\bigr),\qquad
 y=u+\text{SwiGLU}\bigl(\text{RMSNorm}(u)\bigr).
 $$
 
-这个式子同时展示五件事：只有 Decoder；Attention 有因果掩码；RoPE 作用于内部 Q/K；GQA 改变 Q 与 KV 头的对应关系；两个子层都采用 Pre-Norm，FFN 是 Dense SwiGLU。实际模型配置中的头数和位置扩展方法要按具体版本核对。训练时整个序列可并行计算各位置的损失；推理时按 Token 逐步生成并维护 KV Cache。[Llama 2 论文](https://arxiv.org/abs/2307.09288)、[Llama 3 论文](https://arxiv.org/abs/2407.21783)
+沿一个 Token 进入 Block 的路线读这个式子：先 RMSNorm，再投影 Q/K/V；对 Q/K 施加 RoPE，按因果掩码计算 Attention；若该版本采用 GQA，多个 Q 头共用一组 KV 头，否则按 MHA 一一对应；Attention 输出加回 $x$，得到 $u$；再对 $u$ 做 RMSNorm、Dense SwiGLU，最后加回 $u$。于是位置、头共享、门控与 Norm 分别作用在**不同位置**，不是四种互相替代的“Attention 优化”。
+
+训练时，因果掩码允许整段序列并行计算各位置的预测损失；推理时，下一个 Token 尚未出现，只能逐步生成并维护每层 KV Cache。采用 GQA 的版本会减少这份 Cache 的头数，SwiGLU 改变逐 Token 特征变换，却不决定 Cache 的长度。Llama 家族的具体头数、位置扩展方法与版本有关，不能把上式当成所有尺寸的逐项配置清单。[Llama 2 论文](https://arxiv.org/abs/2307.09288)、[Llama 3 论文](https://arxiv.org/abs/2407.21783)
 
 ### 7.3 Mistral：头共享与可见窗口可以同时改变
 
-Mistral 7B 同时采用 GQA 和 Sliding Window Attention。前者减少 KV 头数，后者限制单层 Query 直接访问的历史范围；它们分别作用于**表示布局**和**Attention 掩码**。因此评估长上下文时要同时问：每层保存多少 KV？当前 Token 直接看哪些历史位置？多层传播能否满足具体任务？不能只凭一个“窗口大小”或一个“支持长度”推断实际检索能力。[Mistral 7B 论文](https://arxiv.org/abs/2310.06825)
+在 Llama 一类 Dense Decoder 的基础上，Mistral 7B 进一步调整两个不同维度：GQA 减少每个位置的 KV 头数；Sliding Window Attention 限制当前 Token 在**单层**能直接读到的历史范围。若窗口宽度是 $W$，单层当前 Query 只与附近最多 $W$ 个历史位置做匹配；较远位置的信息仍可能经多层的局部传递间接影响当前表示，但这不等于当前层能直接随机访问任意远处 Token。
+
+因此分析长上下文时，应分别问：每层保存多少 KV？当前 Query 直接看哪些位置？多层传播能否满足任务所需的远距离检索？窗口机制与 GQA 可以叠加，却解决不同问题。缓存能否限制在窗口内还要结合滚动缓存等具体实现；不能只凭“支持长度”推断实际检索能力。[Mistral 7B 论文](https://arxiv.org/abs/2310.06825)
 
 ### 7.4 Mixtral：保留 Decoder 主干，把 Dense FFN 改为 MoE
 
-Mixtral 的关键变化不是让 Attention 路由到 Expert，而是**在 FFN 位置**用 Router 为每个 Token 选择两个 Expert。Attention 仍负责 Token 间的信息交互；Expert 负责逐 Token 的非线性变换。多张 GPU 上实现时，Token 可能需要跨卡发送到 Expert；这增加通信与负载均衡问题。模型的总参数多，但每个 Token 只激活其中一部分 Expert 参数。[Mixtral 论文](https://arxiv.org/abs/2401.04088)
+沿 Mixtral 的一个 Block 走一遍：先做因果 Self-Attention，得到已经融合上下文的 Token 表示；到 FFN 位置时，Router 对**每个 Token 分别**选出两个 Expert；两个 Expert 各自变换同一 Token 的表示，再把输出按路由权重合并。这里被路由的是逐 Token 的 FFN 计算，Attention 仍承担 Token 间的信息交换。相邻 Token 即使互相注意，也可能选择不同 Expert。
+
+这种设计扩大了可用参数容量，同时让每个 Token 只执行少数 Expert；代价是权重存储、路由负载与 Expert 间通信。若 Expert 分布在多张 GPU 上，Token 可能跨卡发送，实际速度不只由“每 Token 激活多少参数”决定。它也说明 MoE 与 KV Cache 作用在不同阶段：前者选 FFN 路径，后者复用生成时的历史 Attention 状态。[Mixtral 论文](https://arxiv.org/abs/2401.04088)
 
 ### 7.5 DeepSeek-V2/V3：同时改变 Attention 缓存与 FFN 容量
 
-这条路线在 Attention 侧采用 MLA，重点压缩历史状态；在 FFN 侧采用 DeepSeekMoE，重点扩大总 Expert 容量而保持每 Token 的稀疏计算。两者解决的问题不同：**MLA 对准 KV Cache，MoE 对准参数容量与计算分配**。因此不能把“MoE 模型”与“MLA 模型”混为一类，也不能仅凭二者存在就断定某一部署配置更快。还要看 Expert 放置、路由批量、KV 实现与硬件互联。[DeepSeek-V2 论文](https://arxiv.org/abs/2405.04434)、[DeepSeek-V3 技术报告](https://arxiv.org/abs/2412.19437)
+DeepSeek-V2/V3 把两条前面分别讨论的路线放进同一 Decoder 主干。走到 Attention 时，MLA 让历史位置主要保存压缩 latent，并单独处理承载位置的信息路径；当前 Query 利用这些缓存状态计算历史匹配。走到 FFN 时，DeepSeekMoE 让 Router 为当前 Token 选择少量路由 Expert，并结合共享 Expert 处理公共信息。两种选择发生在 Block 的不同子层，不是同一个“稀疏机制”。
+
+因此可以分别检查收益和代价：**MLA 对准 KV Cache 的容量与读取；MoE 对准参数容量与每 Token 计算分配。** MLA 的推理实现要处理 latent/位置分量，MoE 的部署要处理 Expert 放置、Token 分发和负载。某一配置是否更快，要连同批量、序列长度、KV 实现与硬件互联一起衡量，不能从“用了 MLA + MoE”直接推出。[DeepSeek-V2 论文](https://arxiv.org/abs/2405.04434)、[DeepSeek-V3 技术报告](https://arxiv.org/abs/2412.19437)
 
 ## 八、用一套问题读懂任何新模型架构
 
