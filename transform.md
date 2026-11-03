@@ -1,5 +1,7 @@
 # 从零理解 Transformer：从基本思想到数学公式，完整拆解最初版本
 
+> 本篇保留原始 Transformer 的完整公式推导，适合查计算细节。若想先用图和例子理解后续架构变化，可读[从原始 Transformer 到现代大模型](从原始Transformer到现代大模型：逐项理解架构演进.md)。
+
 ## 开篇：从「苹果」一词理解 Attention
 
 在进入 Transformer 的网络结构之前，先看一个具体的句子：

@@ -21,6 +21,10 @@
 
 同样的 Self-Attention 公式，只要**可见范围**和**训练目标**不同，就会形成不同模型。
 
+先看下图：左侧 Encoder 读完源序列，右侧 Decoder 逐步生成目标序列；绿色线把源端信息送到 Cross-Attention。下文把其中的两侧分别拿出来，就得到另外两种常见架构。图展示的是**最初版本**，后续模型会改变层内组件。
+
+![原始 Transformer 中 Encoder 与 Decoder 的信息流](images/transform/raster/13-encoder-decoder.png)
+
 ### 1.1 Encoder-only：以 BERT 为代表
 
 Encoder 中位置 $i$ 通常可以注意到输入中的所有非 Padding 位置，包括它右边的 Token。若任务是判断一句话的情感或抽取实体，这种双向上下文很自然。BERT 用 Masked Language Modeling 等目标预训练这种表示；它不是一个按原样逐 Token 续写的因果语言模型。[BERT 论文](https://arxiv.org/abs/1810.04805)
@@ -29,22 +33,13 @@ Encoder 中位置 $i$ 通常可以注意到输入中的所有非 Padding 位置�
 
 ### 1.2 Encoder–Decoder：原始 Transformer 与 T5
 
-Encoder 先得到源序列表示 $H_{\mathrm{enc}}$。Decoder 的第 $t$ 个位置通过因果 Self-Attention 只看目标前缀，再以自己的状态产生 Query，以 $H_{\mathrm{enc}}$ 产生 Key/Value 做 Cross-Attention：
-
-$$
-Q=H_{\mathrm{dec}}W_Q,\qquad K=H_{\mathrm{enc}}W_K,\qquad V=H_{\mathrm{enc}}W_V.
-$$
+Encoder 先得到完整源序列的表示。Decoder 的第 $t$ 个位置通过因果 Self-Attention 只看目标前缀；随后做 Cross-Attention：**Query 来自 Decoder 当前状态，Key/Value 来自 Encoder 输出**。图中的绿色横线正表示这条源端信息路径。
 
 因此“目标端当前要写什么”和“源序列提供哪些证据”分属两个信息通道。T5 保留 Encoder–Decoder，把多种文本任务统一成 text-to-text；它仍然适合明确给定输入、再产生输出的任务。[T5 论文](https://arxiv.org/abs/1910.10683)
 
 ### 1.3 Decoder-only：以 GPT/Llama 为代表
 
-把提示词和待生成内容放进**同一条序列**。位置 $t$ 只能读取不晚于 $t$ 的位置：
-
-$$
-\text{score}_{t,j}=\frac{q_t k_j^\top}{\sqrt{d_k}}+M_{t,j},\qquad
-M_{t,j}=\begin{cases}0,&j\le t,\\-\infty,&j>t.\end{cases}
-$$
+把提示词和待生成内容放进**同一条序列**。因果掩码只允许位置 $t$ 读取自己和左边的 Token，右边尚未出现或被遮住。阅读图时可以把 Decoder 看成只保留右侧的**因果 Self-Attention → FFN** 主干，不再接左侧 Encoder 的绿色信息线。
 
 这使“阅读提示”和“续写答案”共享一套因果 Attention。它没有独立的 Encoder，也没有原始架构中读取 Encoder 输出的 Cross-Attention。代价是一个 Prompt 内的 Token 也受因果可见性限制；它们不是在每一层都双向交换信息。
 
@@ -80,36 +75,23 @@ $$
 
 把一层因果 Self-Attention 想成「当前 Token 提问，历史 Token 提供索引和内容」：当前 Token 产生 Query $q_t$；每个历史位置 $j\le t$ 留下 Key $k_j$ 和 Value $v_j$。先用 $q_t\cdot k_j$ 决定关注程度，再对 $v_j$ 加权求和。**K 用于匹配，V 用于取回信息；两者都要按历史长度保存或重新计算。**
 
-有了 KV Cache，前一步计算过的历史 K/V 不必重算，但每生成一个新 Token，当前 Query 仍要读取它能看到的历史 K/V。设序列长度为 $S$、层数为 $L$、Query 头数为 $h_q$、KV 头数为 $h_{kv}$，每个 K/V 头维度暂设为同一个 $d$，每个元素占 $b$ 字节。忽略分片、对齐和元数据，完整因果 Attention 的 KV Cache 大小约为：
+有了 KV Cache，前一步计算过的历史 K/V 不必重算，但每生成一个新 Token，当前 Query 仍要读取它能看到的历史 K/V。缓存长度和每个位置存储的信息量共同决定显存与读取压力；容量的完整估算放在第六节。MHA、MQA、GQA、MLA 在这里要回答的核心问题是：**为了保留多个 Query 头，每个历史 Token 究竟保存什么？**
 
-$$
-M_{KV}\approx 2LS h_{kv}db \quad\text{（单条序列；有 $B$ 条时再乘 $B$）}.
-$$
+![MHA、MQA、GQA、MLA 的 Query 头与历史缓存对比](images/transformer-evolution/06-head-cache-comparison.png)
 
-前面的 $2$ 分别是 K 和 V。Decode 一步至少需要读取与可见历史相关的 KV 数据；真实耗时还受权重读取、计算、缓存布局、并行分片和硬件带宽影响。MHA、MQA、GQA、MLA 的关键区别就是：**为了保留多个 Query 头的能力，每个历史 Token 究竟保存什么。**
+先从左到右数蓝色 Q 头：数量不变；再看下方绿色历史状态。前三种是在改变**完整 KV 被多少头共享**，MLA 改为缓存共同的压缩表示和位置分量。图底部橙色圆柱只表示一种典型配置的容量趋势，**不是四种机制对任意配置都严格递减**。
 
 ### 2.2 MHA：每个 Query 头都有自己的 K/V 头
 
-标准 Multi-Head Attention（MHA）有 $h_q=h_{kv}=h$。第 $a$ 个头用自己的投影把隐藏状态 $x_t$ 变成 $q_t^{(a)},k_t^{(a)},v_t^{(a)}$，对历史分别计算：
+标准 Multi-Head Attention（MHA）有 $h_q=h_{kv}=h$。每个头都从当前隐藏状态投影出自己的 Q/K/V。查询时，先拿本头 Q 与历史本头 K 比较，Softmax 得到权重，再用这些权重汇总本头的历史 V；最后拼接各头输出。完整计算见[原始 Transformer 笔记](transform.md)，这里重点追踪**需要为每个历史位置保存什么**。
 
-$$
-o_t^{(a)}=\sum_{j\le t}\alpha_{t,j}^{(a)}v_j^{(a)},\qquad
-\alpha_{t,j}^{(a)}=\text{softmax}_{j}\!\left(
-\frac{q_t^{(a)}\cdot k_j^{(a)}}{\sqrt d}+M_{t,j}\right).
-$$
-
-最后拼接各头结果并乘输出投影 $W_O$。不同头有独立的 Q/K/V 投影，因此可以形成不同的匹配和取值方式；这里的“可以”不保证每个头一定学到人能命名的功能。
+拼接后还需经过输出投影 $W_O$。不同头有独立的 Q/K/V 投影，因此可以形成不同的匹配和取值方式；这里的“可以”不保证每个头一定学到人能命名的功能。
 
 用四头示意：$Q_1$ 查自己的 $K_1/V_1$ 历史，$Q_2$ 查 $K_2/V_2$，直到 $Q_4$。每个历史 Token 要存 **4 份 K 和 4 份 V**，即 $8d$ 个元素。上下文越长，Decode 每步读取的历史越多；这就是减少 KV 头数的直接动机。[原始 Transformer 论文](https://arxiv.org/abs/1706.03762)
 
 ### 2.3 MQA：Query 仍有多头，K/V 只存一份
 
-Multi-Query Attention（MQA）保持 $h_q=h$ 个不同 Query 头，却令 $h_{kv}=1$。四头例子变为 $Q_1,Q_2,Q_3,Q_4$ 都访问同一份历史 $K/V$：
-
-$$
-o_t^{(a)}=\sum_{j\le t}\text{softmax}_{j}\!\left(
-\frac{q_t^{(a)}\cdot k_j}{\sqrt d}+M_{t,j}\right)v_j.
-$$
+Multi-Query Attention（MQA）保持 $h_q=h$ 个不同 Query 头，却令 $h_{kv}=1$。四头例子变为 $Q_1,Q_2,Q_3,Q_4$ 都访问同一份历史 $K/V$。图中所有蓝色 Q 箭头收敛到一组绿色 KV；共享的是历史资料，当前各头的“问题”仍然不同。
 
 **共享 K/V 不等于四个头的输出相同。** 各头的 Query 不同，得到的匹配分数和权重仍可不同；只是它们都从同一组 Key 中匹配、同一组 Value 中取值。四头示意中每历史 Token 从 $8d$ 个 KV 元素降为 $2d$ 个，理想的 **KV 数量**降为四分之一。Query 投影、输出投影、FFN 和模型权重没有按这个比例缩小。
 
@@ -117,18 +99,11 @@ $$
 
 ### 2.4 GQA：让一组 Query 头共享一份 K/V
 
-Grouped-Query Attention（GQA）处于两者之间。它把 $h_q$ 个 Query 头分成 $h_{kv}$ 组，每组配一份 K/V。四个 Query 头、两个 KV 组时，$Q_1,Q_2$ 共用 $K_1/V_1$，$Q_3,Q_4$ 共用 $K_2/V_2$。设 $g(a)$ 是头 $a$ 所在组，公式只是把 MHA 的同编号 K/V 换成组编号：
-
-$$
-o_t^{(a)}=\sum_{j\le t}\text{softmax}_{j}\!\left(
-\frac{q_t^{(a)}\cdot k_j^{(g(a))}}{\sqrt d}+M_{t,j}\right)v_j^{(g(a))}.
-$$
+Grouped-Query Attention（GQA）处于两者之间。它把 $h_q$ 个 Query 头分成 $h_{kv}$ 组，每组配一份 K/V。四个 Query 头、两个 KV 组时，$Q_1,Q_2$ 共用第一组 KV，$Q_3,Q_4$ 共用第二组。**一个 Query 头只读所属组的 KV**；同组内仍可凭不同 Q 得到不同权重。
 
 通常让 $h_q$ 可被 $h_{kv}$ 整除，于是每组有 $h_q/h_{kv}$ 个 Query 头。边界很容易记：$h_{kv}=h_q$ 是 MHA，$h_{kv}=1$ 是 MQA。四头两组每历史 Token 保存 $4d$ 个 KV 元素，正好落在 MHA 的 $8d$ 与 MQA 的 $2d$ 之间。
 
-![MHA、GQA 和 MQA 中四个 Query 头与 KV 头的对应关系](images/transformer-evolution/01-mha-gqa-mqa.png)
-
-读图时先数蓝色 Query：三栏都是四个；再数绿色 KV：分别为四组、两组、一组。**减少的是被缓存、被读取的 KV 头数，不是 Query 头数，也不是因果掩码的可见范围。**
+用上面的四栏图回看前三栏：**减少的是被缓存、被读取的 KV 头数，不是 Query 头数，也不是因果掩码的可见范围。**
 
 再看一个接近实际配置的算例：固定 $h_q=32,d=128,S=4096$，只比较**一层、一条序列、每元素 2 字节**的 KV：
 
@@ -150,15 +125,7 @@ $$
 
 可以把 $c_j^{KV}$ 理解成一份共同的“资料摘要”。它不是把一个已经训练好的 MHA Cache 原封不动地压缩成无损文件；**模型训练时就学习了如何写这份摘要，以及各头怎样读取它**。它也不是 MQA：MQA 的多个头直接共用**同一对完整 K/V**；MLA 的不同头可通过各自的上投影，从**同一个 latent**得到不同的内容 K/V。
 
-用公式写这三步。设 $a$ 表示 Attention 头，$d_c$ 是压缩向量的宽度：
-
-$$
-\underbrace{c_j^{KV}=W_{\mathrm{down}}^{KV}x_j}_{\text{写入共享表示}},\qquad
-\underbrace{k_j^{C,(a)}=W_{\mathrm{up},K}^{(a)}c_j^{KV}}_{\text{各头的内容 Key}},\qquad
-\underbrace{v_j^{C,(a)}=W_{\mathrm{up},V}^{(a)}c_j^{KV}}_{\text{各头的内容 Value}}.
-$$
-
-上标 $C$ 表示 **content（内容）**。图中蓝色的 $c_j^{KV}$ 是历史 Token 写下的共享表示；右侧两个 Attention Head 都能使用它，但各头的投影参数可以不同。
+把流程分成“写入”和“读取”：历史 Token $j$ 的隐藏状态先经降维投影，写入宽度为 $d_c$ 的共享 $c_j^{KV}$；未来不同头用各自的上投影，从同一份 $c_j^{KV}$ 取得内容 Key/Value。图中蓝色的 latent 是**一份共同底稿**，右侧两个 Head 的读取参数可以不同；这正是它与 MQA 直接共用完整 KV 的区别。
 
 ![DeepSeek-V2 式 MLA 对每个历史 Token 缓存共享内容 latent 与位置 Key](images/transformer-evolution/05-mla-cache.png)
 
@@ -186,13 +153,7 @@ $$
 
 上一步能重排，有一个条件：$W_{\mathrm{up},K}^{(a)}$ 是**与历史位置无关的固定矩阵**。RoPE 却要按 Token 位置旋转 Q/K。若把位置 $j$ 的旋转直接套在完整内容 Key 上，位置相关的旋转矩阵会夹在投影与点积之间；不同 $j$ 要用不同旋转，便不能用一组固定矩阵把上一步的重排做完。
 
-DeepSeek-V2 因此将匹配分成两部分：内容部分继续走可压缩、可重排的 $c_j^{KV}$ 路径；位置部分另算一个带 RoPE 的 Key $k_j^R$。当前 Token 的每个 Query 头也有自己的位置分量 $q_t^{R,(a)}$。一个头的匹配分数可以先按下面的结构理解，随后仍要做缩放和 Softmax：
-
-$$
-\text{匹配分数}_{t,j}^{(a)}\ \propto
-\underbrace{q_t^{C,(a)\top}k_j^{C,(a)}}_{\text{内容匹配}}
-+\underbrace{q_t^{R,(a)\top}k_j^R}_{\text{位置匹配}}.
-$$
+DeepSeek-V2 因此将匹配分成两部分：内容部分继续走可压缩、可重排的 $c_j^{KV}$ 路径；位置部分另算一个带 RoPE 的 Key $k_j^R$。当前 Token 的 Query 也有对应的位置分量。**内容匹配分数与位置匹配分数相加**，随后才做缩放和 Softmax；图中的两条缓存路径正对应这两部分。这里省略各头下标，完整定义见[DeepSeek-V2 论文第 2.1 节](https://arxiv.org/html/2405.04434v5)。
 
 因此 DeepSeek-V2 式 MLA 的**每层、每历史 Token**缓存元素数是 $d_c+d_R$，而非仅 $d_c$，也不能套用 GQA 的 $2h_{kv}d$。它的 Query 侧还用了低秩投影，但那主要影响训练激活内存，不会再减少历史 KV Cache。以上描述按 [DeepSeek-V2 论文第 2.1 节](https://arxiv.org/html/2405.04434v5)解释；[DeepSeek-V3 技术报告](https://arxiv.org/abs/2412.19437)沿用 MLA 路线。具体模型的维度和实际推理收益要看配置与实现。
 
@@ -225,21 +186,15 @@ Mistral 7B 结合 GQA 与 Sliding Window Attention；Longformer 还把局部窗�
 
 下面始终看同一对位置：当前位置 $i=10$ 要读取历史位置 $j=8$，两者相隔 $2$；若把整段文本整体后移，变成 $i=110,j=108$，相隔仍是 $2$。位置方法回答的是：模型如何利用这个“第几位”和“相隔几位”？
 
+![绝对位置、T5 相对 Bias、RoPE 和 ALiBi 的位置注入路径](images/transformer-evolution/07-position-methods.png)
+
+读图先看橙色的位置线索进入哪里：最左栏在 Q/K/V 生成前进入输入；T5 与 ALiBi 在 Softmax 前给分数加项；RoPE 先旋转 Q/K，再让相对位移影响点积。图省略了各方法共有的缩放和因果掩码，ALiBi 一栏的距离惩罚应按**负值**理解。四栏是不同路线，不要求模型按顺序采用。
+
 ### 3.1 第一步：把绝对位置加到 Token 表示上
 
 原始 Transformer 把位置向量 $p_i$ 加到词向量 $e_i$：$x_i=e_i+p_i$。这样两个相同的词出现在不同位置时，输入向量也不同。位置编码只在底部加入一次，但此后的每一层都能通过隐藏状态间接使用它。原始论文使用不同频率的正弦、余弦；另一类实现把每个位置的 $p_i$ 作为可学习参数。[最初版本笔记](transform.md)给出了完整公式。[原始 Transformer 论文](https://arxiv.org/abs/1706.03762)
 
-**它怎样影响 Attention？** 省略缩放和偏置，令 $q_i=(e_i+p_i)W_Q$、$k_j=(e_j+p_j)W_K$，则点积展开为四部分：
-
-$$
-q_i k_j^\top=
-(e_iW_Q)(e_jW_K)^\top+
-(e_iW_Q)(p_jW_K)^\top+
-(p_iW_Q)(e_jW_K)^\top+
-(p_iW_Q)(p_jW_K)^\top.
-$$
-
-第一项主要来自内容；后三项让位置与内容、位置与位置相互作用。因此说“绝对位置编码不能表达相对距离”是不准确的：**模型有可能从这些项中学到相对关系**。正弦编码尤其有一个设计动机：固定偏移对应的正弦向量之间存在可表示的线性关系。
+**它怎样影响 Attention？** 图中 $e_i$ 与 $p_i$ 相加后才投影成 Q/K/V，因此点积里既有“内容对内容”，也有“内容对位置”“位置对内容”“位置对位置”的交互。说“绝对位置编码不能表达相对距离”并不准确：**模型有可能从这些交互中学到相对关系**。只是它必须从绝对向量的组合中学到这一点，而不是直接收到“两个位置相隔 2”的信号。正弦编码的设计还让固定位置偏移对应可表示的线性关系。
 
 它留下两个问题。其一，模型没有直接收到“$i-j=2$”这个特征；它需要从 $p_{10},p_8$ 等绝对向量的组合中学会用距离。训练时常见的 $(10,8)$ 与很少见或没见过的 $(110,108)$ 虽然距离相同，绝对位置输入仍不同。其二，**学习式绝对位置表**通常只为有限位置建参数，超出表的范围需要扩展或另做处理；**正弦位置可以继续计算新位置**，但能计算不代表模型在未训练长度上必然表现好。
 
@@ -263,15 +218,7 @@ $a$ 是 Attention 头；$M_{ij}$ 是可见范围的掩码，作用与位置偏�
 
 ### 3.3 第三步：RoPE 让相对距离进入内容匹配本身
 
-T5 的相对 Bias 是给点积分数**另加一项**。Rotary Position Embedding（RoPE）追求另一种形式：按各自绝对位置旋转 Q/K，让两者的**点积本身**带上相对位移。先看一对二维通道，位置 $t$ 对应角度 $t\theta$：
-
-$$
-R(t\theta)=\begin{bmatrix}
-\cos(t\theta)&-\sin(t\theta)\\
-\sin(t\theta)&\cos(t\theta)
-\end{bmatrix},\qquad
-q'_i=R(i\theta)q_i,\quad k'_j=R(j\theta)k_j.
-$$
+T5 的相对 Bias 是给点积分数**另加一项**。Rotary Position Embedding（RoPE）追求另一种形式：把 Q/K 的通道两两配对，位置 $t$ 对应旋转角度 $t\theta$，先按各自位置旋转，再做点积。记旋转后的向量为 $q'_i=R(i\theta)q_i$、$k'_j=R(j\theta)k_j$；图中间两条橙色路径就是这一步，V 不需要同样旋转。
 
 旋转不改变向量长度。更重要的是，两个旋转后的向量做点积时，角度会相减：
 
@@ -289,20 +236,13 @@ $$
 
 ### 3.4 另一条路线：ALiBi 用固定距离惩罚强调近期
 
-Attention with Linear Biases（ALiBi）也直接改分数，但不学习每个距离桶的 $b$。对因果 Attention 的某个头 $a$，它给越远的历史位置越大的**负偏置**：
+Attention with Linear Biases（ALiBi）也直接改分数，但不学习每个距离桶的 $b$。对因果 Attention 的某个头，它在 Softmax 前给越远的历史位置越大的**负偏置**：距离乘以该头固定的正斜率，再从内容分数中减去。
 
-$$
-s_{ij}^{(a)}=\frac{q_i^{(a)}k_j^{(a)\top}}{\sqrt{d_k}}
--m_a(i-j)+M_{ij},\qquad j\le i,\quad m_a>0.
-$$
-
-这里 $m_a$ 是每个头固定的斜率，不是由训练学习出的距离表。例如只为直观理解，若 $m_a=0.1$ 且两处内容点积分数相同，距离 $1$ 的位置被减 $0.1$，距离 $10$ 的位置被减 $1.0$；Softmax 前者因此更有优势。不同头使用不同斜率，有的更偏向近处，有的惩罚远处较轻。[ALiBi 论文第 3 节](https://arxiv.org/html/2108.12409)
+记某个头的固定斜率为 $m_a$，它不是由训练学习出的距离表。例如只为直观理解，若 $m_a=0.1$ 且两处内容点积分数相同，距离 $1$ 的位置被减 $0.1$，距离 $10$ 的位置被减 $1.0$；Softmax 前者因此更有优势。不同头使用不同斜率，有的更偏向近处，有的惩罚远处较轻。[ALiBi 论文第 3 节](https://arxiv.org/html/2108.12409)
 
 它针对的是**位置外推与训练长度成本**：线性距离公式对训练时未见过的更远位置也有定义，不需要扩展位置 Embedding 表或新增距离桶。论文在其语言建模设置中验证了“较短序列训练、较长序列推理”的效果。不过，“公式有定义”仍不是对任意长度任务的效果保证；固定的近期偏好也可能不适合必须精确找回远处信息的任务。ALiBi 与 T5 Bias 都是“给 logits 加项”，但前者是**固定线性距离规则**，后者是**按距离桶学习偏置**。
 
-![绝对位置、相对位置 Bias 与 RoPE 各自进入 Attention 的位置](images/transformer-evolution/02-position-injection.png)
-
-图中间的“相对位置 Bias”也可对应 ALiBi 的加分数位置；两者的区别是**偏置如何产生**。RoPE 下方的 Q/K 是旋转后的向量。图省略了缩放、掩码以及与 V 的加权求和。
+回看四栏图，T5 与 ALiBi 都在 Softmax 前改分数，但一个学习距离桶的偏置，一个使用固定线性惩罚。RoPE 则让位移进入 Q/K 的内容匹配。
 
 ### 3.5 把递进关系放在同一张表中
 
@@ -319,24 +259,17 @@ $$
 
 Attention 让 Token 彼此交换信息；FFN 在每个 Token 的隐藏维上独立计算。把 Attention 换成 GQA，并不会自动改变 FFN；它们是两条独立的技术轴。
 
+![普通 FFN、SwiGLU 与 MoE 的逐 Token 计算路径](images/transformer-evolution/08-ffn-swiglu-moe.png)
+
+三栏从左到右分别改变了不同的东西：普通 FFN 只有一条扩维、激活、投回的路径；SwiGLU 在同一个 FFN 内增加一条门分支；MoE 在多套 FFN 中选择本次运行的 Expert。图中 MoE 的 E1/E3 仅是一次 Token 路由的示意，别的 Token 可以选其他 Expert。
+
 ### 4.1 普通 Dense FFN：换激活函数
 
-原始 FFN 对每个 Token 的向量 $x\in\mathbb R^H$ 做同一套变换：
+原始 FFN 对每个 Token 的向量 $x\in\mathbb R^H$ 做同一套变换：$W_1$ 把隐藏维从 $H$ 扩到 $D$，ReLU 激活，再由 $W_2$ 投回 $H$。图的左栏就是这一条路径。
 
-$$
-z=W_1x+b_1\in\mathbb R^{D},\qquad
-\text{FFN}(x)=W_2\text{ReLU}(z)+b_2\in\mathbb R^H.
-$$
+通常 $D>H$。序列中所有 Token 共用 $W_1,W_2$，但输入不同，输出自然不同。ReLU 对中间结果的负值通道直接输出 0，对正值原样通过。其优点是简单；代价是阈值附近不平滑，负值侧没有渐进的保留空间。
 
-通常 $D>H$。先扩维，给不同中间通道学习不同特征，再投回模型维；序列中所有 Token 共用 $W_1,W_2$，但输入不同，输出自然不同。ReLU 对 $z<0$ 的通道直接输出 0，对 $z>0$ 原样通过。其优点是简单；代价是阈值附近不平滑，负值侧没有渐进的保留空间。
-
-GELU 把门限改成随输入连续变化的权重：
-
-$$
-\text{GELU}(z)=z\,\Phi(z),
-$$
-
-其中 $\Phi$ 是标准正态分布的累积分布函数。比如 $z=-1$ 时，ReLU 输出 0，GELU 约为 $-0.159$；$z=1$ 时，GELU 约为 $0.841$。这说明它不是简单地“只保留正数”，而是平滑地调节通道贡献。**换激活函数没有改变 FFN 的连接方式**：仍是两次投影、所有 Token 共用一套权重，计算量仍主要来自两个矩阵乘法。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
+GELU 把门限改成随输入连续变化的权重：输入 $z$ 乘上标准正态分布的累计概率 $\Phi(z)$。比如 $z=-1$ 时，ReLU 输出 0，GELU 约为 $-0.159$；$z=1$ 时，GELU 约为 $0.841$。这说明它不是简单地“只保留正数”，而是平滑地调节通道贡献。**换激活函数没有改变 FFN 的连接方式**：仍是两次投影、所有 Token 共用一套权重，计算量仍主要来自两个矩阵乘法。[GLU Variants 论文](https://arxiv.org/abs/2002.05202)
 
 ### 4.2 门控 FFN：GEGLU 与 SwiGLU
 
@@ -352,20 +285,13 @@ $\phi=\text{GELU}$ 常称 GEGLU；$\phi=\text{SiLU}$（$\text{SiLU}(z)=z\,\sigma
 
 ### 4.3 MoE：把一套 FFN 换成可选择的多套 Expert
 
-Mixture of Experts（MoE）在某些层把 Dense FFN 换成 $E$ 个 Expert（通常各自是 FFN）。Router 对每个 Token 产生分数，选择 $k$ 个 Expert：
-
-$$
-\mathcal T(x)=\text{TopK}(r(x),k),\qquad
-y(x)=\sum_{e\in\mathcal T(x)}g_e(x)E_e(x).
-$$
+Mixture of Experts（MoE）在某些层把 Dense FFN 换成 $E$ 个 Expert（通常各自是 FFN）。Router 对每个 Token 产生分数，选择其中 $k$ 个；只有选中的 Expert 执行本次 FFN 计算，输出再按路由权重合并。图的右栏画的是四选二。
 
 若 $E=8,k=2$，一个 Token 只运行两个选中的 Expert，而模型存有八套 Expert 参数。这使**总参数量**和**每 Token 激活的参数/计算量**不再同比增加。不能把“8 个 Expert”理解为“推理只需存 2 个 Expert”：不同 Token 的选择不同，服务仍需容纳可被路由到的权重。也不能把 “8×7B” 简单乘成总参数，因为 Attention 等非 Expert 参数通常是共享的。
 
 按一次前向传播来看，先由 Router 为当前 Token 算出 $E$ 个路由分数；再挑出 Top-$k$；把这个 Token 的表示交给选中的 Expert；最后用门控权重合并 Expert 输出。假设分数排序为 $e_2>e_5>e_1$，且 $k=2$，则本次只执行 $E_2(x),E_5(x)$；下一个 Token 可能选中完全不同的一对。这与上一节的 SwiGLU 不同：SwiGLU 在**同一个 FFN 内调节中间通道**，MoE 在**多套 FFN 之间选择计算路径**。两者也可叠加，Expert 自身可以采用门控 FFN。
 
-这里的“稀疏”主要指 Expert 计算。Router 仍需打分，公共 Attention 仍要运行；总权重仍需存放或在设备间分布。若大量 Token 都选同一 Expert，该 Expert 会拥塞，其他 Expert 闲置。因此实际训练/服务还要处理负载均衡、每个 Expert 的容量以及跨设备发送 Token 的成本；增大 Expert 数不会自动带来等比例吞吐提升。
-
-MoE 的代价来自 Router 负载不均、跨卡 Token Dispatch、Expert 批量大小和训练稳定性。Mixtral 使用每 Token top-2 的稀疏专家；Switch Transformer 探索 top-1；DeepSeekMoE 还引入更细粒度的专家与共享 Expert 等设计。具体是否丢弃超容量 Token、如何平衡负载，依实现而异。[Mixtral 论文](https://arxiv.org/abs/2401.04088)、[Switch Transformer 论文](https://arxiv.org/abs/2101.03961)、[DeepSeekMoE 论文](https://arxiv.org/abs/2401.06066)
+这里的“稀疏”主要指 Expert 计算。Router 仍需打分，公共 Attention 仍要运行；总权重仍需存放或在设备间分布。若大量 Token 都选同一 Expert，该 Expert 会拥塞，其他 Expert 闲置。实际训练/服务要处理负载均衡、Expert 容量、跨卡 Token Dispatch、Expert 批量大小与训练稳定性；增大 Expert 数不会自动带来等比例吞吐提升。Mixtral 使用每 Token top-2 的稀疏专家，Switch Transformer 探索 top-1，DeepSeekMoE 还引入更细粒度与共享 Expert 等设计。具体是否丢弃超容量 Token、如何平衡负载，依实现而异。[Mixtral 论文](https://arxiv.org/abs/2401.04088)、[Switch Transformer 论文](https://arxiv.org/abs/2101.03961)、[DeepSeekMoE 论文](https://arxiv.org/abs/2401.06066)
 
 **MoE 是模型层的计算选择，EP 是把 Expert 分布到不同 GPU 的并行部署策略。** 两者不是同义词。跨卡 Token 如何发送，见[分布式并行策略](大模型分布式并行策略_DP_TP_SP_PP_EP%20%281%29.md)和[GPU 通信篇](大模型_GPU通信方式_NCCL与性能优化.md)。
 
@@ -393,42 +319,17 @@ $$
 
 先看前向信息流。Pre-Norm 让原输入 $x$ 不经改写就进入残差加法，子层只提供增量 $F(\text{Norm}(x))$；Post-Norm 则先把增量与输入相加，再把总和归一化。两者即使用同一个 LayerNorm、同一个 Attention，得到的函数也不相同。
 
-反向传播时，Pre-Norm 的直通路径也更容易看清。把梯度写成雅可比矩阵，局部上有：
+反向传播时，沿图中的残差主线往回看：Pre-Norm 的梯度有一条不经过 Norm 的直通路径；Post-Norm 的残差相加之后仍要穿过 Norm。多层叠加时，这个路径差别会影响初始化阶段的梯度。已有分析发现，在其研究设置下 Post-LN 的靠近输出层梯度可能较大，学习率 warm-up 对其更关键；Pre-LN 的初始化梯度更容易控制。**这只是解释训练稳定性的一个机制**，并不保证任意深度都稳定，也不能单凭 Norm 顺序判断最终质量。[LayerNorm 位置分析论文](https://arxiv.org/abs/2002.04745)
 
-$$
-\frac{\partial y_{\text{pre}}}{\partial x}
-=I+J_FJ_{\text{Norm}},\qquad
-\frac{\partial y_{\text{post}}}{\partial x}
-=J_{\text{Norm}}(I+J_F).
-$$
-
-Pre-Norm 式子中有显式的恒等项 $I$；Post-Norm 的残差梯度仍要经过 Norm 的导数。多层叠加时，这个路径差别会影响初始化阶段的梯度。已有分析发现，所研究设置下 Post-LN 的靠近输出层梯度可能较大，学习率 warm-up 对其更关键；Pre-LN 的初始化梯度更容易控制。**这只是解释训练稳定性的一个机制**，并不保证任意深度都稳定，也不能单凭 Norm 顺序判断最终质量。[LayerNorm 位置分析论文](https://arxiv.org/abs/2002.04745)
-
-一个 Pre-Norm 的 Attention + FFN Block 可写为：
-
-$$
-u=x+\text{Attention}(\text{Norm}_1(x)),\qquad
-y=u+\text{FFN}(\text{Norm}_2(u)).
-$$
-
-注意第二个 Norm 的输入是 **Attention 残差相加后的 $u$**，不是原始的 $x$。也不要把“Pre-Norm”误认为“整个模型只在最开始做一次 Norm”；每个子层前仍有自己的归一化。
+一个 Pre-Norm Block 通常先做 **Norm → Attention → 残差相加**，再做 **Norm → FFN → 残差相加**。第二个 Norm 的输入是第一次残差相加后的表示，不是最初的 $x$。因此“Pre-Norm”也不表示整个模型只在最开始归一化一次；每个子层前仍有自己的 Norm。
 
 ### 5.2 LayerNorm 与 RMSNorm 的计算差别
 
-对于隐藏向量 $x\in\mathbb R^H$，LayerNorm 先减均值，再按标准差缩放：
+对于单个 Token 的隐藏向量，LayerNorm 先减去**该向量的均值**，再除以标准差，最后做可学习的缩放和平移。RMSNorm 不做减均值，只按该向量的均方根调整尺度，再做可学习缩放。两种运算的差别是“是否中心化”，与上一小节的 Pre/Post 位置选择相互独立。需要精确实现式时可读[RMSNorm 论文](https://arxiv.org/abs/1910.07467)和[原始 Transformer 笔记](transform.md)。
 
-$$
-\mu=\frac1H\sum_jx_j,\quad
-\sigma^2=\frac1H\sum_j(x_j-\mu)^2,\quad
-\text{LN}(x)_i=\gamma_i\frac{x_i-\mu}{\sqrt{\sigma^2+\epsilon}}+\beta_i.
-$$
+![LayerNorm 减均值再缩放，RMSNorm 只按均方根缩放](images/transformer-evolution/09-layernorm-rmsnorm.png)
 
-RMSNorm 不减均值，只用均方根调整尺度：
-
-$$
-\text{RMSNorm}(x)_i=\gamma_i
-\frac{x_i}{\sqrt{\frac1H\sum_jx_j^2+\epsilon}}.
-$$
+图中的柱高只表达归一化步骤，省略了后续可学习缩放与平移，不代表某次真实模型输出；两栏处理的是**同一个 Token 的隐藏向量**，并非跨 Token 统计。下方的小例子给出可核算的数值差别。
 
 两者都通常沿**单个 Token 的隐藏维**计算，而不是在不同 Token 之间求全局均值。RMSNorm 少了中心化这一步，但“少一步”不自动推出任何硬件上固定的加速比例。Llama 2 采用 Pre-Norm RMSNorm；原始 Transformer 是 Post-Norm LayerNorm。T5 则有自己的归一化实现，不能仅因它是 Pre-Norm 就说它与 Llama 完全一样。[RMSNorm 论文](https://arxiv.org/abs/1910.07467)、[Llama 2 论文](https://arxiv.org/abs/2307.09288)
 
@@ -446,13 +347,7 @@ KV Cache 是**自回归推理的执行状态**，不是另一个训练好的 Att
 
 例如 Prompt 是 $A,B,C$。Prefill 在某层保存 $K_A,V_A,K_B,V_B,K_C,V_C$。模型生成 $D$ 后，下一步只需由 $D$ 的该层表示计算 $q_D,k_D,v_D$，把 $k_D,v_D$ 追加到 Cache；$q_D$ 与 $A$ 到 $D$ 的 K 比较，再对对应 V 求加权和。每一层都重复这个过程。之所以可以复用旧 K/V，是因为因果掩码让历史位置的表示**不依赖后来出现的 Token**；模型权重、历史前缀和位置条件保持相同时，历史 K/V 不会因 $D$ 到来而改变。
 
-如果不用 Cache，每生成一个 Token 都把增长后的完整前缀重新送入模型，历史位置的投影和各层前向会反复计算。有了 Cache，当前步只算新位置的隐藏状态：
-
-$$
-K_{\le t}=\text{Concat}(K_{<t},k_t),\quad
-V_{\le t}=\text{Concat}(V_{<t},v_t),\quad
-o_t=\text{softmax}\!\left(\frac{q_tK_{\le t}^{\top}}{\sqrt{d_k}}\right)V_{\le t}.
-$$
+如果不用 Cache，每生成一个 Token 都把增长后的完整前缀重新送入模型，历史位置的投影和各层前向会反复计算。有了 Cache，当前步只算新位置的隐藏状态：把本步的 $k_t,v_t$ 追加到历史 K/V，当前 $q_t$ 再读取可见的整个缓存。下面的图把 Prefill 的写入和 Decode 的追加分开画出。
 
 这里省掉的是**历史位置的重复前向计算**，不只是少做一次 K/V 投影；当前 Query 仍要读取可见历史的 K/V 做 Attention。对于全量因果 Attention，单步读取量随上下文长度增长，缓存本身也随生成长度增长，因此 KV Cache 不让单步成本变成常数。对于滑动窗口等有限可见范围机制，增长规律还取决于具体窗口与缓存实现。
 
@@ -500,15 +395,9 @@ T5 在这种结构里把位置关系作为相对 Bias 加到 Attention 分数，
 
 ### 7.2 Llama：Dense Decoder-only 的一组组合
 
-一个典型 Llama Block 的抽象顺序是：
+一个典型 Llama Block 可以读成两次连续的 **Pre-Norm → 子层 → 残差相加**：第一次的子层是因果 Attention，第二次是 Dense SwiGLU。第一次相加后的表示再进入第二次 Norm。
 
-$$
-u=x+\text{CausalAttention}_{\mathrm{RoPE,MHA/GQA}}
-\bigl(\text{RMSNorm}(x)\bigr),\qquad
-y=u+\text{SwiGLU}\bigl(\text{RMSNorm}(u)\bigr).
-$$
-
-沿一个 Token 进入 Block 的路线读这个式子：先 RMSNorm，再投影 Q/K/V；对 Q/K 施加 RoPE，按因果掩码计算 Attention；若该版本采用 GQA，多个 Q 头共用一组 KV 头，否则按 MHA 一一对应；Attention 输出加回 $x$，得到 $u$；再对 $u$ 做 RMSNorm、Dense SwiGLU，最后加回 $u$。于是位置、头共享、门控与 Norm 分别作用在**不同位置**，不是四种互相替代的“Attention 优化”。
+沿一个 Token 进入 Block 的路线读：先 RMSNorm，再投影 Q/K/V；对 Q/K 施加 RoPE，按因果掩码计算 Attention；若该版本采用 GQA，多个 Q 头共用一组 KV 头，否则按 MHA 一一对应；Attention 输出加回原输入；再做 RMSNorm、Dense SwiGLU，最后再次残差相加。于是位置、头共享、门控与 Norm 分别作用在**不同位置**，不是四种互相替代的“Attention 优化”。
 
 训练时，因果掩码允许整段序列并行计算各位置的预测损失；推理时，下一个 Token 尚未出现，只能逐步生成并维护每层 KV Cache。采用 GQA 的版本会减少这份 Cache 的头数，SwiGLU 改变逐 Token 特征变换，却不决定 Cache 的长度。Llama 家族的具体头数、位置扩展方法与版本有关，不能把上式当成所有尺寸的逐项配置清单。[Llama 2 论文](https://arxiv.org/abs/2307.09288)、[Llama 3 论文](https://arxiv.org/abs/2407.21783)
 
