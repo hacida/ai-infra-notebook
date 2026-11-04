@@ -4,6 +4,20 @@
 
 先看[FFN 与门控](05-FFN与门控.md)：普通 Dense FFN 让每个 Token 经过同一套参数。若希望增加模型可存的特征与知识，却不让**每个 Token**都执行全部新增 FFN，便出现了稀疏 Expert 选择。MoE 的重点是**按 Token 选择参数路径**，不是改变因果 Attention 的可见范围。
 
+## 先从“所有人都去同一个柜台”说起
+
+普通 Dense FFN 像一个窗口：任何 Token 都交给同一套参数处理。把窗口做得更大，确实增加了模型容量，但每个 Token 都要做更多乘法。如果一次请求只有一些 Token 真正需要某类特征，也仍然要对所有 Token 执行全部参数。MoE 的想法是准备多套 FFN，让一个轻量 Router 为**每个 Token、在每个 MoE 层**选出少数几套。
+
+![一个 Token 的 Top-2 Expert 路由](../images/transformer-evolution/13-moe-token-route.png)
+
+图示八套 Expert 中选两套。浅灰 Expert **本次未计算**，但模型仍要存放其参数，因为下一个 Token 可能选中它。选中的两个 Expert 分别处理**同一个 Token 的当前向量**，结果按路由权重合并成一个向量。这里没有把一条句子固定分给某一个 Expert，也没有把 Attention 换成 Expert；通常被替换的是 Block 内的 FFN 位置。
+
+### 跟着一个 Token 走完 Router 到合并
+
+第一步，当前 Token 已经过本层 Attention，获得融合上下文的表示。第二步，Router 根据这个表示给 Expert 打分并选择 Top-$k$。第三步，若 Expert 分布在不同 GPU，系统把 Token 的表示送到相应设备；每个选中的 Expert 独立计算。第四步，将各 Expert 输出按模型规定的权重合并，送回原来的序列位置，继续残差与下一层。下一层可以再次路由，选择可能不同。
+
+这个流程解释了“参数多但每 Token 计算少”的来历，也暴露了新的问题：热门 Expert 排队、冷门 Expert 闲置；跨卡来回发送 Token；每个 Expert 收到的 Token 太少时，矩阵乘法批量效率差。所以评估 MoE 时，除了参数量，还要看**每 Token 激活量、路由分布、通信和实际吞吐**。
+
 ![普通 FFN、SwiGLU 和 MoE 的逐 Token 路径对比](../images/transformer-evolution/08-ffn-swiglu-moe.png)
 
 本篇重点看右栏：Router 为一个 Token 选出两套 Expert，再合并两个输出。左栏的 Dense FFN 每次都走同一套参数；中栏 SwiGLU 是同一套 FFN 内部的门控。图中的 E1/E3 只是一轮示意，不代表固定 Expert 编号。
@@ -41,6 +55,16 @@ Router 的输入是当前 Token 在这一层的隐藏状态，不是先读完一
 DeepSeekMoE 一类设计还可能有**共享 Expert**：它们不受普通 top-$k$ 路由选择的同一规则约束，与路由 Expert 一起提供输出。读参数表时必须分清“总 Expert”“路由激活 Expert”和“共享 Expert”，不能只看一个 top-$k$ 数字。[DeepSeekMoE 论文](https://arxiv.org/abs/2401.06066)
 
 ## 为什么 Expert 很多也可能跑不快？
+
+### 训练时 Router 会自然均匀分配吗？
+
+不会保证。Router 的选择由当前参数和输入共同决定。假设 8 个 Expert 中有一个一开始稍擅长处理常见 Token，越来越多 Token 被送过去，它得到更多训练机会，可能进一步变热门；其他 Expert 的训练信号反而少。这类不平衡使“大量参数”变成“少数参数忙碌”。不同 MoE 设计因此引入负载均衡目标、容量限制或其他路由控制，但这些额外规则会影响训练行为，不能从 Top-$k$ 三个字符推断。[Switch Transformer](https://arxiv.org/abs/2101.03961)、[DeepSeekMoE](https://arxiv.org/abs/2401.06066)
+
+以一个批次 800 个 Token、8 个 Expert、每 Token 选 1 个为纯示意，理想平均每 Expert 接收 100 个。若实际某个 Expert 接收 400 个，而另一个只接收 10 个，前者决定等待时间，后者的大部分计算能力闲置。Top-2 时总分配次数变为 1600，但每个 Token 最终仍合并回一个向量；真实分布依 Router 决定。训练中还需考虑梯度怎样传回 Router 与被选中的 Expert，未被选中 Expert 不会因为这一枚 Token 的 FFN 输出获得同样的更新。
+
+### 为什么“激活参数少”还不足以说明速度？
+
+Dense FFN 在一张 GPU 上通常能把一批 Token 合成大矩阵计算。MoE 先按目的地拆散 Token，Expert 若在不同 GPU，还需发送表示；算完再送回原位置。拆分、通信与合并都有开销，每个 Expert 的小批量也可能让矩阵乘法效率下降。于是 MoE 的优点更准确地说是**在一定每 Token 计算预算下扩大可用参数容量**；是否更快，取决于 Batch、Expert 放置、负载和互联。[Mixtral 论文](https://arxiv.org/abs/2401.04088)
 
 第一个原因是**负载不均**。若大多数 Token 都选择同一个 Expert，热门 Expert 的队列长，其他 Expert 闲置。训练常需负载均衡机制；不同实现对 Expert 容量、溢出 Token、辅助损失的处理并不相同。[Switch Transformer 论文](https://arxiv.org/abs/2101.03961)
 
