@@ -77,7 +77,7 @@ Encoder 先得到完整源序列的表示。Decoder 的第 $t$ 个位置通过�
 
 有了 KV Cache，前一步计算过的历史 K/V 不必重算，但每生成一个新 Token，当前 Query 仍要读取它能看到的历史 K/V。缓存长度和每个位置存储的信息量共同决定显存与读取压力；容量的完整估算放在第六节。要分清两个数：**Query 头数决定当前有几种查询；KV 头数或缓存表示决定每个历史 Token 留下什么。**
 
-![四个 Query 头在 MHA、MQA、GQA 中分别读取哪些历史 KV](images/transformer-evolution/06-mha-mqa-gqa-head-sharing-v2.png)
+![四个 Query 头在 MHA、MQA、GQA 中分别读取哪些历史 KV](images/transformer-evolution/06-mha-mqa-gqa-head-sharing-cropped.png)
 
 图固定 **4 个当前 Q 头**，只改变它们读取历史信息的对应关系。图中的 KV1、KV2 等编号表示**头或组**，不是第 1、2 个历史 Token；实际 Cache 对每个历史 Token、每一层都保存相应的 KV。箭头表示当前 Q **读取**历史 KV。MHA 存 4 组完整 KV，MQA 存 1 组，GQA 存 2 组。若每个 K/V 头宽为 $d$，每历史 Token 分别是 $8d$、$2d$、$4d$ 个元素：**GQA 的 KV 比 MQA 多，目的是在缓存开销与头间信息差异之间折中**。[MQA 论文](https://arxiv.org/abs/1911.02150)、[GQA 论文](https://arxiv.org/abs/2305.13245)
 
