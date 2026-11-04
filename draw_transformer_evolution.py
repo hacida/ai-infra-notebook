@@ -29,8 +29,10 @@ def canvas(title, subtitle):
 
 
 def box(d, xy, title, color=BLUE, fill=WHITE, size=29):
-    d.rounded_rectangle(xy, radius=18, fill=fill, outline=color, width=4)
     left, top, right, bottom = xy
+    d.rounded_rectangle((left+5, top+7, right+5, bottom+7), radius=18,
+                        fill="#e7edf3")
+    d.rounded_rectangle(xy, radius=18, fill=fill, outline=color, width=4)
     bounds = d.textbbox((0, 0), title, font=f(size, True))
     tw, th = bounds[2] - bounds[0], bounds[3] - bounds[1]
     d.text((left + (right-left-tw)/2, top + (bottom-top-th)/2 - 4), title, font=f(size, True), fill=NAVY)
