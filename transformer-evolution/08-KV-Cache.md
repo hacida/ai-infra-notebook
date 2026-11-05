@@ -10,13 +10,13 @@ KV Cache 是**自回归推理的执行状态**，不是另一个训练好的 Att
 
 模型读完 Prompt「你 好」后，已经为每一层、每个位置算过用于 Attention 的 Key 和 Value。它从 Prompt 最后一个位置的输出选出新 Token「呀」。**此刻「呀」只是被选出来，还没有作为输入穿过模型各层**，所以它的各层 K/V 尚未写入 Cache。下一轮把「呀」送进模型，算出它的 Q/K/V，追加 K/V；它的 Query 才读取「你、好、呀」对应的历史。这一处时间顺序若弄错，就会以为 Cache 直接保存“未来答案”。
 
-![Prefill 与下一轮 Decode 的 KV Cache 时间线](../images/transformer-evolution/14-kv-cache-timeline.png)
+![Prefill 与下一轮 Decode 的 KV Cache 时间线](../images/transformer-evolution/14-kv-cache-timeline-v2.png)
 
 图中 Prompt `A B C` 在 Prefill 后形成一层的缓存；预测并选出 `D` 后，下一轮输入 `D` 才计算并追加它的 K/V。Cache 是每层的中间向量，不是文本副本。只要使用因果 Attention、前缀和模型设置保持一致，旧位置不会因新 Token 出现而改变，因此旧 K/V 可以复用。新 Query 仍要读取可见的旧 K/V，历史越长，读取的资料通常越多。
 
 ## 不缓存会重复什么？
 
-![不使用与使用 KV Cache 时，连续三轮输入的对比](../images/transformer-evolution/22-cache-repeat-work.png)
+![不使用与使用 KV Cache 时，连续三轮输入的对比](../images/transformer-evolution/22-cache-repeat-work-v2.png)
 
 从上往下读三轮：第一次 Prefill 处理 `A B C`；选出 `D` 后，下一轮若无 Cache 要重跑 `A B C D`，有 Cache 只把 `D` 送入并追加它的 K/V；再选出 `E` 后同理。右栏没有省掉“当前 Query 查历史”的工作，它省的是旧位置穿过各层的重复前向。图中的箭头是“写入或追加缓存”的动作，不表示旧 K/V 被重新生成。
 
@@ -33,6 +33,12 @@ KV Cache 是**自回归推理的执行状态**，不是另一个训练好的 Att
 图中 $T_4$ 是本步输入 Token，$O_4$ 是其 Attention 输出；实际每一层都维护各自的 Cache，图中只画一层。
 
 ## 容量怎样估算？
+
+### 先不要背公式，先数一枚历史 Token
+
+在一层里，一枚历史 Token 要留下 Key 和 Value 两类向量。如果有 8 个 KV 头、每头 128 维，就有 $2\times8\times128=2048$ 个数；每数用 2 字节，约 4096 字节。一个请求有 4096 枚历史 Token，这一层约要 16 MiB。若有 32 个这样的层，便约为 512 MiB。公式只是把这个数数过程写短；它之所以同时受层数、并发数和上下文长度影响，是因为**每层、每个请求、每个位置都有各自状态**。
+
+这个推演也告诉我们该怎样找优化点：缓存是为了省去旧位置重复计算，不能随意取消；但每枚 Token 留 8 组 KV 是否必要，可以由 MQA/GQA 改；若连“完整 K/V”这种存法也嫌宽，可以考虑 MLA。把 Cache 的存在、每枚 Token 的宽度、缓存页如何分配分成三层问题，后面的缩写才不会搅在一起。
 
 对 Decoder-only MHA/GQA，一个粗略的未压缩 KV 容量公式为：
 
@@ -96,3 +102,5 @@ Prefix Cache 则尝试在**两个请求具有完全相同且可复用的前缀�
 1. Prompt 为 `A B C`，模型刚选出 `D` 时，D 的各层 K/V 已经写入 Cache 了吗？
 2. 为什么 KV Cache 仍需要读取历史 K/V，不能让每步 Attention 变成常数成本？
 3. GQA、PagedAttention 与 Prefix Cache 分别改变缓存的哪个方面？
+
+接下来缓存压力会推动一个直接的架构问题：**每个历史 Token 必须留下多少组完整 K/V？** 继续读[MHA、MQA、GQA](02-MHA-MQA-GQA.md)。

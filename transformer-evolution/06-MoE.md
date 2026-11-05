@@ -8,7 +8,7 @@
 
 普通 Dense FFN 像一个窗口：任何 Token 都交给同一套参数处理。把窗口做得更大，确实增加了模型容量，但每个 Token 都要做更多乘法。如果一次请求只有一些 Token 真正需要某类特征，也仍然要对所有 Token 执行全部参数。MoE 的想法是准备多套 FFN，让一个轻量 Router 为**每个 Token、在每个 MoE 层**选出少数几套。
 
-![一个 Token 的 Top-2 Expert 路由](../images/transformer-evolution/13-moe-token-route.png)
+![一个 Token 的 Top-2 Expert 路由](../images/transformer-evolution/13-moe-token-route-v2.png)
 
 图示八套 Expert 中选两套。浅灰 Expert **本次未计算**，但模型仍要存放其参数，因为下一个 Token 可能选中它。选中的两个 Expert 分别处理**同一个 Token 的当前向量**，结果按路由权重合并成一个向量。这里没有把一条句子固定分给某一个 Expert，也没有把 Attention 换成 Expert；通常被替换的是 Block 内的 FFN 位置。
 
@@ -35,6 +35,12 @@ Mixture of Experts（MoE）在某些层把 Dense FFN 换成 $E$ 个 Expert（通
 **MoE 是模型层的计算选择，EP 是把 Expert 分布到不同 GPU 的并行部署策略。** 两者不是同义词。跨卡 Token 如何发送，见[分布式并行策略](../大模型分布式并行策略_DP_TP_SP_PP_EP%20%281%29.md)和[GPU 通信篇](../大模型_GPU通信方式_NCCL与性能优化.md)。
 
 ## Router 的一次具体工作
+
+### Router 到底是在选“知识”，还是选“计算路径”？
+
+读者容易把 E1 想成“数学专家”、E2 想成“翻译专家”。训练后的 Expert 可能呈现某些偏好，但模型没有被要求把每个 Expert 固定成这样的人类学科分类。Router 看的是当前层的 Token 向量，输出的是本次要运行哪些参数路径；同一个词出现在不同上下文、不同层，路径都可能不同。选中某个 Expert 也不表示 Attention 只看那个 Expert 的 Token：跨 Token 的信息交换已经由 Attention 处理，MoE 在 FFN 位置对**当前 Token**做条件计算。
+
+换成系统视角，Router 的决定还有物理后果。若 E3 在另一张 GPU，这枚 Token 的向量就要被发送过去，计算完再送回原序列位置；若同一批次太多 Token 都选 E3，它会成为排队瓶颈。于是路由不仅关乎质量，还影响负载均衡、Expert 批量和通信。这里的瓶颈无法仅靠“总参数很多、每 Token 只激活两个 Expert”这句话判断。
 
 假设某层有四个 Expert，一个 Token 的 Router 分数按大小排为 $E_3>E_1>E_4>E_2$。若采用 top-2，本次只把这个 Token 送入 $E_3$ 与 $E_1$；两个输出按路由权重合并后，仍得到**一个** Token 向量交给下一层。下一层有自己的 Router，也可能选择别的 Expert；序列中另一个 Token 的选择也可能完全不同。
 
@@ -79,3 +85,5 @@ Dense FFN 在一张 GPU 上通常能把一批 Token 合成大矩阵计算。MoE 
 1. 为什么 8 个 Expert、top-2 不等于只需存 2 个 Expert 的权重？
 2. SwiGLU 的“门”和 MoE Router 的“路由”各在什么层次发生？
 3. 什么情况下增加 Expert 数可能让吞吐受通信或负载限制？
+
+最后把这些独立变化放回具体模型，沿着一个 Token 的完整路径阅读：[按模型组合架构](09-按模型组合架构.md)。

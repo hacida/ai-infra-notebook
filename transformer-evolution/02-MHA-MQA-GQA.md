@@ -36,6 +36,10 @@ MLA 不是“再减少几组完整 KV”。它改变了历史状态的**存储�
 
 ## MQA：Query 仍有多头，K/V 只存一份
 
+### 为什么先想到减少 KV，而不是减少 Query？
+
+在逐 Token Decode 中，当前步的 Query 只为**眼前这一枚 Token**生成；历史 K/V 却积累了成千上万个位置，而且下一步还要再次被读取。要减轻长上下文的显存和带宽压力，优先缩窄“反复保存和读取的历史侧”更直接。MQA 因此保留多个 Query 头的提问方式，却让它们共用一套历史索引和内容。这里并不保证它在所有任务都更好：压缩历史侧的自由度可能损失质量，GQA 正是为这个取舍留出中间档位。[MQA 论文](https://arxiv.org/abs/1911.02150)、[GQA 论文](https://arxiv.org/abs/2305.13245)
+
 Multi-Query Attention（MQA）保持 $h_q=h$ 个不同 Query 头，却令 $h_{kv}=1$。四头例子变为 $Q_1,Q_2,Q_3,Q_4$ 都访问同一份历史 $K/V$。图中所有蓝色 Q 箭头收敛到一组绿色 KV；共享的是历史资料，当前各头的“问题”仍然不同。
 
 **共享 K/V 不等于四个头的输出相同。** 各头的 Query 不同，得到的匹配分数和权重仍可不同；只是它们都从同一组 Key 中匹配、同一组 Value 中取值。四头示意中每历史 Token 从 $8d$ 个 KV 元素降为 $2d$ 个，理想的 **KV 数量**降为四分之一。Query 投影、输出投影、FFN 和模型权重没有按这个比例缩小。
@@ -43,6 +47,8 @@ Multi-Query Attention（MQA）保持 $h_q=h$ 个不同 Query 头，却令 $h_{kv
 代价是头之间不再拥有独立的 K/V 投影。共享越激进，表示能力与质量越可能受到影响；实际幅度需要由训练和任务验证。MQA 主要针对增量 Decode 反复读取历史 KV 的带宽瓶颈。[MQA 论文](https://arxiv.org/abs/1911.02150)
 
 ## GQA：让一组 Query 头共享一份 K/V
+
+从 MQA 往 GQA 走，看似“又把缓存加回去了”，其实是在回答质量问题。若所有 Query 头只能从同一组 K/V 中选信息，它们仍能以不同 Q 得到不同权重，但历史侧能够提供的表示方式只有一套。把 32 个 Q 头分给 8 组 KV，相当于每 4 个 Query 共用一套；历史端重新拥有 8 套可学习的投影，而不是 1 套。代价是缓存从 1 组增至 8 组。**这是有意用一部分显存和带宽换表达余地**，并不是发现了比 MQA 还小的 Cache。[GQA 论文](https://arxiv.org/abs/2305.13245)
 
 Grouped-Query Attention（GQA）处于两者之间。它把 $h_q$ 个 Query 头分成 $h_{kv}$ 组，每组配一份 K/V。四个 Query 头、两个 KV 组时，$Q_1,Q_2$ 共用第一组 KV，$Q_3,Q_4$ 共用第二组。**一个 Query 头只读所属组的 KV**；同组内仍可凭不同 Q 得到不同权重。
 
@@ -58,7 +64,7 @@ Grouped-Query Attention（GQA）处于两者之间。它把 $h_q$ 个 Query 头�
 | MQA | 1 | $2\times1\times128=256$ | 2 MiB |
 | GQA | 8 | $2\times8\times128=2048$ | 16 MiB |
 
-![固定 Query 头数时不同 KV 头数的一层缓存对比](../images/transformer-evolution/15-kv-head-storage-bars.png)
+![固定 Query 头数时不同 KV 头数的一层缓存对比](../images/transformer-evolution/15-kv-head-storage-bars-v2.png)
 
 图只把上表的**一层 KV Cache**画成长条：32 个 Query 头一直不变，MHA、8 组 GQA、MQA 各存 64、16、2 MiB。它没有比较模型权重、FFN、算子效率和输出质量，因此不能把长条比例读成整机速度比例。更少的 KV 组通常节省缓存，却也让更多 Query 头共用同一套历史投影；GQA 正是对这两个目标做折中。
 
@@ -96,4 +102,4 @@ GQA 不只是运行时把若干 MHA 头的 Cache 指针设成同一个地址。�
 2. 为什么 MQA 的缓存最小，却仍可能选择 GQA？
 3. 把全量 Attention 改为滑动窗口，改变的是 KV **头数**还是可见的**历史位置数**？
 
-下一篇进入另一条压缩路线：[MLA 为什么缓存共享 latent](03-MLA.md)。
+头共享改变了“历史资料有几套”；下一篇改问“顺序与距离怎样影响匹配分数”：[位置编码](04-位置编码.md)。

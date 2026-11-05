@@ -12,16 +12,18 @@
 
 ## 建议阅读顺序
 
+这组文章按**概念依赖**而非缩写出现的年代排序。先建立一个 Block 怎样传递信息，再跟着一次生成看历史状态为何膨胀；读懂这个压力后，头共享和 MLA 才有明确的动机。位置编码放在 MLA 前面，因为 MLA 的位置路径正是为处理 RoPE 与低维缓存的冲突。FFN 和 MoE 是另一条“每个 Token 怎样加工特征”的路线，最后才把两条路线组合进具体模型。
+
 | 顺序 | 专题 | 核心问题 | 读完应能解释 |
 | :--- | :--- | :--- | :--- |
 | 1 | [整体架构与可见范围](transformer-evolution/01-整体架构与可见范围.md) | 一个 Token 能看见谁？ | Encoder-only、Encoder–Decoder、Decoder-only 为何适合不同任务；为什么生成必须因果 |
-| 2 | [MHA、MQA、GQA](transformer-evolution/02-MHA-MQA-GQA.md) | 多个 Query 头为什么共享 KV？ | MQA 怎样减缓存；GQA 为什么又保留多组 KV；头数与窗口的区别 |
-| 3 | [MLA](transformer-evolution/03-MLA.md) | 为什么改存低维 latent？ | 历史内容怎样压缩；如何避免每步展开全部 K/V；为何单存位置 Key |
-| 4 | [位置编码](transformer-evolution/04-位置编码.md) | 顺序与距离怎样进入 Attention？ | 绝对位置、T5 Bias、RoPE、ALiBi 各解决了什么，又留下什么限制 |
-| 5 | [FFN 与门控](transformer-evolution/05-FFN与门控.md) | 每个 Token 的特征怎样变换？ | ReLU/GELU 与 SwiGLU 的结构差别；门控宽度为何不能机械照搬 |
-| 6 | [MoE](transformer-evolution/06-MoE.md) | 为什么不让每个 Token 用全部 FFN 参数？ | Router、Top-$k$、Expert 合并，以及总参数、激活计算、跨卡通信的关系 |
-| 7 | [归一化与残差](transformer-evolution/07-归一化与残差.md) | 深层网络怎样传递表示与梯度？ | Pre/Post-Norm 与 LayerNorm/RMSNorm 是两项独立选择 |
-| 8 | [KV Cache](transformer-evolution/08-KV-Cache.md) | 生成下一词时为什么不用重算整个前缀？ | Prefill/Decode、容量估算、缓存复用和系统管理 |
+| 2 | [归一化与残差](transformer-evolution/07-归一化与残差.md) | 深层网络怎样传递表示与梯度？ | 为什么需要旁路与尺度控制；Pre/Post-Norm 和 LayerNorm/RMSNorm 怎样分别选择 |
+| 3 | [KV Cache](transformer-evolution/08-KV-Cache.md) | 生成下一词时为什么不用重算整个前缀？ | Prefill/Decode、容量估算、缓存复用和系统管理 |
+| 4 | [MHA、MQA、GQA](transformer-evolution/02-MHA-MQA-GQA.md) | 多个 Query 头为什么共享 KV？ | MQA 怎样减缓存；GQA 为什么又保留多组 KV；头数与窗口的区别 |
+| 5 | [位置编码](transformer-evolution/04-位置编码.md) | 顺序与距离怎样进入 Attention？ | 绝对位置、T5 Bias、RoPE、ALiBi 各解决了什么，又留下什么限制 |
+| 6 | [MLA](transformer-evolution/03-MLA.md) | 为什么改存低维 latent？ | 历史内容怎样压缩；如何避免每步展开全部 K/V；为何单存位置 Key |
+| 7 | [FFN 与门控](transformer-evolution/05-FFN与门控.md) | 每个 Token 的特征怎样变换？ | ReLU/GELU 与 SwiGLU 的结构差别；门控宽度为何不能机械照搬 |
+| 8 | [MoE](transformer-evolution/06-MoE.md) | 为什么不让每个 Token 用全部 FFN 参数？ | Router、Top-$k$、Expert 合并，以及总参数、激活计算、跨卡通信的关系 |
 | 9 | [按模型组合架构](transformer-evolution/09-按模型组合架构.md) | 这些部件放回模型后怎样一起工作？ | 沿 T5、Llama、Mistral、Mixtral、DeepSeek 的数据流读配置 |
 
 ## 一张问题地图
