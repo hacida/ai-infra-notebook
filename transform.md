@@ -1,155 +1,93 @@
-# 从零理解 Transformer：从基本思想到数学公式，完整拆解最初版本
+# 从一次翻译理解原始 Transformer：结构、Attention 与关键公式
 
-> 本篇保留原始 Transformer 的完整公式推导，适合查计算细节。若想先用图和例子理解后续架构变化，可读[从原始 Transformer 到现代大模型](从原始Transformer到现代大模型：逐项理解架构演进.md)。
+> 本文用同一句翻译贯穿输入、Encoder、Decoder、生成与训练。先看数据怎样走，再拆开 Attention、FFN 和 Add & Norm。公式用于核对计算，首次阅读可以先沿文字和图片走一遍。想了解后续模型怎样改变这些部件，可接着读[架构演进系列](从原始Transformer到现代大模型：逐项理解架构演进.md)。
 
-## 开篇：从「苹果」一词理解 Attention
+## 一、一次翻译怎样完成？
 
-在进入 Transformer 的网络结构之前，先看一个具体的句子：
+我们要把「我把苹果放进冰箱。」译成「I put the apple in the fridge.」。先停在生成中途：目标侧已经有 `<BOS> I put the`，模型下一步想预测 `apple`。`<BOS>` 是表示开始的特殊 Token；图中按词展示，真实分词器可能把一句话切成不同的 Token。
 
-> 我今天买了一部苹果手机，它的拍照效果很好。
+源句先交给 **Encoder**。它不是直接输出英文，而是为源句各位置生成带上下文的向量表示。随后，**Decoder** 读入已经生成的英文前缀：先在目标侧读取过去的词，再读取 Encoder 留下的源句信息，最后给英文词表里的各个候选 Token 打分。`apple` 是这个例子中期望得到的下一个词，并非模型无条件必然输出的结果。
 
-这里的「苹果」并不是指水果，而是指 Apple 品牌。
+![从中文源句到下一英文 Token 的翻译路线](images/transform/article-v2/01-translation-route.png)
 
-如果模型只看「苹果」这个词本身，很难准确判断它在当前句子中的含义。它需要结合周围的词语：
+图中有两条输入线：中文源句通向 Encoder，已生成的英文前缀通向 Decoder。Decoder 的交叉注意力把两条线接在一起。图只画**一次预测**；得到 `apple` 后，推理时再把它接到前缀后面，继续预测 `in`、`the`、`fridge` 等后续词。训练时已知完整译文，目标位置可以在因果掩码保护下一起计算；推理时未知未来词，所以必须逐词生成。
 
-- 「买了」提供动作信息；
-- 「手机」提供商品类别信息；
-- 「拍照效果」进一步强化电子产品这一语义。
+## 二、为什么需要 Transformer？
 
-这正是 Attention 要解决的问题：
-
-**一个词的新表示，不应该只由它自身决定，还应该融合句子中其他相关词所提供的信息。**
-
-假设我们现在要更新「苹果」所在位置的表示。Attention 的计算单位是 **Token 位置**，不是固定的中文词组；实际如何切分取决于分词器。为便于示意，下面假设「苹果」和「手机」是两个 Token，「拍照效果」暂作一个 Token。模型计算「苹果」与这些位置的关联程度，再转换为权重。
-
-例如，得到一组示意性的权重：
-
-| Token 位置 | Attention 权重（示意） |
-| :--------- | ---------------------: |
-| 我         |                   0.02 |
-| 今天       |                   0.02 |
-| 买了       |                   0.14 |
-| 一部       |                   0.04 |
-| 苹果       |                   0.07 |
-| 手机       |                   0.43 |
-| 它的       |                   0.03 |
-| 拍照效果   |                   0.22 |
-| 很好       |                   0.03 |
-
-这组权重相加为 1，只是帮助理解的一种假设，并非模型实际算出的结果。「苹果」仍可关注自身，但这里更大的权重落在「手机」和「拍照效果」上。权重只是本次 Value 加权求和的系数，不直接等于某个 Token 对最终判断的贡献比例。
-
-![上下文帮助判断「苹果」的语义](images/transform/raster/01-apple-context.png)
-
-图中连线只表示示意性的上下文信息来源，不对应真实模型的注意力权重。
-
-模型按权重融合各位置提供的信息后，「苹果」的表示便带上了当前句子的上下文，不再只是孤立的词向量。
-
-这就是 Attention 最核心的思想：
-
-**根据当前词的需要，从其他词中动态提取信息，并将这些信息融合到当前词的表示中。**
-
-接下来先看这次信息交换处在整台翻译模型的什么位置，再回头拆解计算。
-
-### 先看全程：从输入句子到下一个译词
-
-以把「我爱你」译成英文为例：源句进入 **Encoder**，得到每个源 Token 的上下文表示；**Decoder** 读入已经生成的目标前缀，例如 `<BOS> I love`，通过因果自注意力读取前缀，再通过交叉注意力读取 Encoder 的输出，最后经线性层和 Softmax 预测下一个 Token，例如 `you`。继续生成时，新词会加入 Decoder 的输入前缀。
-
-![原始 Transformer 从源句到下一个译词的路线](images/transform/raster/03-translation-route.png)
-
-图中只画一次预测，省略了重复堆叠的层、位置编码和 Add & Norm。Encoder 处理源句；Decoder 的 Query 来自目标侧，交叉注意力读取的 Key/Value 来自源句的 Encoder 输出。后文再逐一展开这些模块，第八节细看层内结构。示例按词展示，实际 Token 切分仍由分词器决定。
-
----
-
-## 一、Transformer 是什么？为什么需要它？
-
-2017 年，Google 的研究团队发表了一篇具有里程碑意义的论文：
-
-**Attention Is All You Need**
-
-这篇论文提出了一种全新的神经网络架构：Transformer。
-
-在 Transformer 出现之前，自然语言处理领域的主流序列建模架构主要有两种：
-
-1. RNN（循环神经网络）
-2. CNN（卷积神经网络）
-
-它们都可以处理文本序列，但在建模长距离依赖和并行计算方面存在局限。
-
-### 1.1 RNN 的问题
-
-假设我们需要处理下面这句话：
-
-> 我今天买了一部苹果手机，它的拍照效果很好。
-
-模型需要理解「苹果」在这里指的是一个手机品牌，而不是一种水果。
-
-这要求模型能够结合句子中不同位置的信息，建立词语之间的依赖关系。
-
-RNN 的基本思想是按照时间顺序处理输入：
+在它之前，RNN 常用来处理序列。RNN 的当前状态依赖前一步：
 
 $$
 h_t=f(x_t,h_{t-1})
 $$
 
-其中：
+这里 $x_t$ 是当前位置的输入，$h_{t-1}$ 是上一位置传来的状态。要处理后一个位置，必须等前一个位置算完；远处信息也要经过多步传递。LSTM、GRU 改善了长期依赖的学习，但没有消除这条同层顺序依赖。
 
-- $x_t$：当前位置的输入；
-- $h_t$：当前位置的隐藏状态；
-- $h_{t-1}$：前一个位置的隐藏状态。
+Transformer 把序列内部的信息交换交给 **Self-Attention**：一个位置可以直接计算它与允许读取的其他位置的关系。Encoder 里的源句位置可互相读取；Decoder 的目标位置只能读取自己和过去的位置，不能偷看未来。
 
-也就是说，当前时刻的信息依赖前一个时刻的计算结果。
+![RNN 的逐步传递与 Transformer 的直接关联](images/transform/article-v2/02-rnn-vs-transformer.png)
 
-处理整个句子时，计算过程如下：
+图只比较信息路径，不表示实际注意力权重或两种模型的计算量。自注意力建立直接连接，也让一层中不同位置的主要矩阵运算便于并行；但标准全局注意力仍需处理位置两两之间的关系，序列很长时会付出计算和显存代价。
+
+## 三、文本怎样进入模型？
+
+先区分三个说法：**词**是我们读句子时使用的语言单位；**Token** 是分词器交给模型的单位，未必恰好等于一个词；**位置**是某个 Token 在当前序列中的序号。下面把「我 / 把 / 苹果 / 放进 / 冰箱」当作教学用 Token 切分，英文前缀也按词展示。实际切分方式由分词器决定。
+
+### 3.1 从 Token 到向量
+
+模型先用 Embedding 表把每个 Token 映射为 $d_{\text{model}}$ 维向量。单有这些向量仍不够：如果输入位置互换，纯粹的自注意力没有内建的先后顺序。比如「把苹果放进冰箱」和「把冰箱放进苹果」使用了相近的词，却表达了完全不同的关系。
+
+同一个 Token 的 Embedding 不随它在句子里的位置自动改变。若把「苹果」从第 1 个位置移到第 3 个位置，它的内容向量仍来自同一行 Embedding 表；模型还需要另一份信息指出“现在在哪里”。位置编码提供的就是这份序列坐标。单靠自注意力，打乱输入位置后，输出也会相应跟着换位，却没有额外信号告诉模型哪个位置原本在前。
+
+原始 Transformer 在 Encoder 和 Decoder 的输入底部都加入位置编码。内容向量与位置向量怎样合成？对于位置 $p$，输入可写成：
 
 $$
-h_1\rightarrow h_2\rightarrow\cdots\rightarrow h_n
+X(p)=\sqrt{d_{\text{model}}}\,E_{\text{token}}(p)+\mathrm{PE}(p)
 $$
 
-这种结构存在两个主要问题。
+这里 $E_{\text{token}}(p)$ 是该位置 Token 的 Embedding；两项维度相同，因此逐元素相加。根号因子是原论文对 Embedding 的缩放，不是 Attention 分数里的 $\sqrt{d_k}$。
 
-**第一，难以并行计算。**
+![不同频率的位置编码与 Token 表示相加](images/transform/article-v2/03-positional-encoding.png)
 
-由于 $h_t$ 依赖 $h_{t-1}$，必须等待前一个位置计算完成，才能计算下一个位置。
+图的横轴是位置 $p$，曲线表示不同维度随位置变化的取值；右侧 $E(p)$ 表示**缩放后的** Embedding，$X(p)=E(p)+PE(p)$。图展示位置向量怎样与内容向量合成输入，不表示相邻位置必然语义相近。
 
-**第二，长距离依赖难以学习。**
+### 3.2 原始位置编码怎样构造？
 
-虽然 LSTM、GRU 等结构缓解了传统 RNN 的梯度消失问题，但当两个相关词语距离很远时，信息仍然需要经过多个时间步传递，学习长距离依赖仍然比较困难。
+原论文使用不同频率的正弦、余弦函数：
 
-### 1.2 Transformer 的核心思想
+$$
+\mathrm{PE}_{(p,2i)}=\sin\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right),\qquad
+\mathrm{PE}_{(p,2i+1)}=\cos\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right)
+$$
 
-Transformer 提出了一个重要思路：
+$p$ 是位置，$2i$ 和 $2i+1$ 是一对向量维度。随着 $i$ 增大，分母 $10000^{2i/d_{\text{model}}}$ 增大：有些维度沿位置变化得快，有些变化得慢。一个位置因此由多种频率的取值共同表示。这些数值不需逐个解释成“第几个词”，重点是不同位置进入 Attention 前带有不同的规律性信号。
 
-**处理一个词时，可以直接计算它与序列中其他词之间的关联程度，并从相关位置提取信息。**
+为什么用成对的 Sin/Cos？对某个固定的位移 $k$，位置 $p+k$ 的一对取值可以由位置 $p$ 的这一对取值通过线性组合表示。这给模型学习相对位移提供了规律。它不等于模型自动理解所有未见过的长序列；原论文把可能外推到更长长度视为选用固定位置函数的一个理由，而非保证。
 
-例如，在理解「苹果」时，模型可以直接从「手机」「买了」「拍照效果」等位置获取上下文信息，而不必依赖信息沿着时间步逐个传递。
+## 四、一个位置怎样读取上下文？
 
-这就是 Attention（注意力机制）的基本思想。
+先放大源句里的「苹果」。只看它本身，可能想到水果，也可能想到品牌；结合「放进」「冰箱」后，水果的解释更自然。这里说的是**可能用于更新表示的上下文**，不是用一张注意力图证明模型最终为什么作出某个判断。
 
-![RNN 的逐步传递与 Transformer 的直接关联](images/transform/raster/02-rnn-vs-transformer.png)
+假设源句被示意性地切成「我 / 把 / 苹果 / 放进 / 冰箱」。更新「苹果」位置时，一个注意力头可能给出下面这组权重：
 
-左侧强调同一层 RNN 的顺序依赖；右侧展示自注意力中一个位置可直接关联其他位置。
+| 被读取的 Token | 权重（示意） |
+| :--- | ---: |
+| 我 | 0.05 |
+| 把 | 0.05 |
+| 苹果 | 0.10 |
+| 放进 | 0.35 |
+| 冰箱 | 0.45 |
 
-与 RNN 不同，Transformer 不使用循环结构；与 CNN 不同，它也不依赖卷积来建立序列内部的关联，而是主要通过 Attention 完成信息交互。
+这五个数相加为 1，但它们不是实际模型输出。每个权重只是当前头对对应 Value 的加权系数，**不直接等于**该 Token 对最终语义判断的贡献比例。
 
-需要注意，Transformer 并不是简单地把 Attention 放进神经网络，而是围绕 Attention 设计了一套完整的编码器、解码器和训练架构。
+![源句上下文参与更新苹果位置的表示](images/transform/article-v2/04-apple-context.png)
 
----
+图的终点是「苹果」的新表示；下游任务可以使用这个表示，但不能只凭图中的连线或权重断言模型内部的解释过程。
 
-## 二、先认清 Attention 的三个角色
+### 4.1 Q、K、V 是哪三个角色？
 
-开篇只看到「苹果」读取上下文，还没有解释权重从何而来。先记住三个角色：当前 Token 的 **Query（Q）** 用来发起匹配，各位置的 **Key（K）** 用来接受匹配，各位置的 **Value（V）** 是最终被读取的信息。计算顺序是 **Q 与 K 得到分数 → Softmax 得到权重 → 按权重汇总 V**。
+当前 Token 的 **Query（Q）** 提出匹配需求，各位置的 **Key（K）** 用于与它比较，各位置的 **Value（V）** 是最后被取回的信息。先用 Q 与 K 得到分数，再用 Softmax 转成权重，最后对 V 加权求和。同一位置的 K 和 V 配对：匹配用 K，汇总用 V。
 
-![Attention 的匹配、归一化与信息融合](images/transform/raster/04-attention-stages.png)
-
-图中同一位置的 Key 和 Value 成对出现：该 Key 与当前 Query 共同决定匹配分数，得到的权重再乘到同一位置的 Value 上。下一节从输入向量出发，算出这些量及其维度。
-
----
-
-## 三、Q、K、V 是如何计算的？
-
-有了 Q、K、V 的分工，现在看它们如何由输入向量生成，以及匹配分数怎样变成新的表示。
-
-### 3.1 从输入向量得到 Q、K、V
+### 4.2 从输入向量得到 Q、K、V
 
 假设输入序列的向量矩阵为：
 
@@ -193,11 +131,11 @@ $$
 - 作为 Key，它需要表达自己具备什么特征，便于其他 Token 匹配。
 - 作为 Value，它需要表达自己能够提供什么信息。
 
-通过不同的线性变换，模型可以学习三种不同的表示空间。
+通过不同的线性变换，模型可以学习三种不同的表示空间。下图只追踪**同一个 Token 向量**怎样产生三种角色：
 
-![同一输入向量经三个独立线性投影得到 Q、K、V](images/transform/raster/05-qkv-projection.png)
+![同一输入向量经三个独立线性投影得到 Q、K、V](images/transform/article-v2/05-qkv-projection.png)
 
-### 3.2 用点积衡量关联程度
+### 4.3 用点积衡量关联程度
 
 有了 Q 和 K，接下来需要计算它们之间的匹配程度。
 
@@ -221,17 +159,13 @@ $$
 S=QK^\top\in\mathbb{R}^{n\times n}
 $$
 
-得到一个 $n\times n$ 的注意力分数矩阵。
+得到一个 $n\times n$ 的注意力分数矩阵。为什么矩阵的行列各对应一个位置？第 $i$ 行第 $j$ 列就是第 $i$ 个 Token 查询第 $j$ 个 Token 的匹配分数。
 
-其中第 $i$ 行第 $j$ 列表示：
+![Q 与 K 的点积形成 Token 间的分数矩阵](images/transform/article-v2/06-qk-score-matrix.png)
 
-第 $i$ 个 Token 对第 $j$ 个 Token 的注意力匹配分数。
+图中行对应发起查询的位置，列对应被查询的位置；第 $i$ 行第 $j$ 列的分数是 $q_i$ 与 $k_j$ 的点积。
 
-![Q 与 K 的点积形成 Token 间的分数矩阵](images/transform/raster/06-qk-score-matrix.png)
-
-图中维度符号 $d$ 对应本文的 $d_k$；矩阵中的 $s_{23}$ 是第 2 个 Query 与第 3 个 Key 的点积。
-
-### 3.3 为什么要除以 $\sqrt{d_k}$？
+### 4.4 为什么要除以 $\sqrt{d_k}$？
 
 这是 Transformer 中一个非常重要的细节。
 
@@ -271,7 +205,7 @@ $$
 \alpha_{ij}=\frac{\exp(s_{ij}/\sqrt{d_k})}{\sum_{\ell=1}^{n}\exp(s_{i\ell}/\sqrt{d_k})}
 $$
 
-同一行的权重非负且相加为 1。例如三个缩放后的分数为 $[2,1,0]$ 时，Softmax 约给出 $[0.665,0.245,0.090]$。第一个位置在这次加权中系数约为 0.665；这**不是**它对最终语义判断贡献了 66.5%。
+同一行的权重非负且相加为 1。权重表示这次 Value 加权求和的系数，**不等于**某个位置对最终语义判断的贡献比例。
 
 如果输入数值过大，Softmax 容易出现某个位置的概率接近 1，其他位置接近 0 的情况。
 
@@ -289,11 +223,16 @@ $$
 
 这就是 Transformer 最核心的数学公式之一。
 
-![缩放点积对 Softmax 输入尺度的影响](images/transform/raster/07-scaling-softmax-zh.png)
+用一个可验算的例子感受缩放。假设 $d_k=4$，某行未缩放分数为 $[4,2,0]$，除以 $\sqrt{d_k}=2$ 后变成 $[2,1,0]$：
 
-两行柱形图是数值尺度的定性示意，并不表示每次缩放都会得到相同形状的注意力分布。
+| 处理 | 分数 | Softmax 权重（约） |
+| :--- | :--- | :--- |
+| 未缩放 | $[4,2,0]$ | $[0.867,0.117,0.016]$ |
+| 除以 $2$ | $[2,1,0]$ | $[0.665,0.245,0.090]$ |
 
-### 3.4 完整走一遍 Attention 的计算
+这只是同一组分数的数值示例，说明缩放会改变 Softmax 输入的尺度；它不保证每次都产生某种固定分布。
+
+### 4.5 完整走一遍 Attention 的计算
 
 把前面的步骤串起来，对于第 $i$ 个 Token：
 
@@ -302,11 +241,7 @@ $$
 3. 对分数做 Softmax，得到权重 $\alpha_{ij}$；
 4. 用权重对 $v_j$ 加权求和，得到 $z_i$。
 
-最后一步写成 $z_i=\sum_{j=1}^{n}\alpha_{ij}v_j$。这里 $\alpha_{ij}$ 与第 $j$ 个位置的 Value $v_j$ 配对，$z_i$ 是第 $i$ 个位置融合信息后的表示。若用于 Decoder 的因果自注意力，还要在 Softmax **之前**遮住未来位置；交叉注意力的 Q 与 K/V 则分别来自 Decoder 和 Encoder，详见第八节。
-
----
-
-## 四、Multi-Head Attention：多头注意力
+最后一步写成 $z_i=\sum_{j=1}^{n}\alpha_{ij}v_j$。这里 $\alpha_{ij}$ 与第 $j$ 个位置的 Value $v_j$ 配对，$z_i$ 是第 $i$ 个位置融合信息后的表示。若用于 Decoder 的因果自注意力，还要在 Softmax **之前**遮住未来位置；交叉注意力的 Q 与 K/V 则分别来自 Decoder 和 Encoder，详见第五节。
 
 前面介绍的 Attention，每个 Token 只用一组 Q、K、V，这称为单头 Attention。
 
@@ -325,7 +260,7 @@ $$
 
 当然，这只是帮助理解的直观例子，并不意味着每个头一定具有固定的语言学功能。
 
-### 4.1 多头注意力的基本思想
+### 4.6 多头注意力的基本思想
 
 Transformer 将输入分别映射到多个不同的 Q、K、V 空间。
 
@@ -379,9 +314,9 @@ $$
 
 最终再经过 $W^O$，输出维度仍然为 512。
 
-![Base 模型中的八头并行、拼接与输出投影](images/transform/raster/09-multi-head.png)
+![多个注意力头并行、拼接与输出投影](images/transform/article-v2/07-multi-head.png)
 
-### 4.2 为什么不直接使用一个 512 维的 Attention？
+### 4.7 为什么不直接使用一个 512 维的 Attention？
 
 多头机制的价值在于：
 
@@ -391,131 +326,19 @@ $$
 
 这增强了模型的表达能力。
 
----
+## 五、这些模块怎样组成 Encoder 和 Decoder？
 
-## 五、Transformer 为什么还需要位置编码？
+### 5.1 Encoder：源句内部先交换信息
 
-到目前为止，我们已经有了 Attention。
+源句经过 Embedding 与位置编码后，进入 Encoder 层。每层先做**双向自注意力**：同一源句中的每个位置都可以读取其他源句位置，Q/K/V 都由该层的输入产生。比如「苹果」可以读取「放进」「冰箱」，更新后的表示再进入 FFN。Encoder 不负责直接写出英文，它输出一组源句表示，供 Decoder 的交叉注意力读取。
 
-但是，Transformer 还有一个非常重要的问题需要解决。
+原始 Base 模型把这样的 Encoder 层重复 6 次。单层的两类子层是自注意力和 FFN；每个子层外都有残差连接与 LayerNorm。下面先看 FFN 和这条外侧路径，再看多出的 Decoder 子层。
 
-**Attention 本身并不知道 Token 的先后顺序。**
+![一个 Encoder 层与一个 Decoder 层的子层连接](images/transform/article-v2/08-encoder-decoder-layer.png)
 
-例如：
+图中 Encoder 一侧只有自注意力与 FFN；Decoder 一侧在因果自注意力后多了交叉注意力。Encoder 输出只接到交叉注意力的 K/V，Decoder 当前状态提供 Q。图画单层连接，原始 Base 模型两侧各堆叠 6 层。
 
-$$
-[x_{\text{我}},x_{\text{喜欢}},x_{\text{你}}]
-$$
-
-与：
-
-$$
-[x_{\text{你}},x_{\text{喜欢}},x_{\text{我}}]
-$$
-
-如果只考虑 Token 向量之间的注意力计算，模型没有天然的顺序概念。
-
-而自然语言中，词语的顺序往往决定句子的含义。
-
-例如：
-
-- 我喜欢你。
-- 你喜欢我。
-
-因此，Transformer 必须向模型注入位置信息。
-
-这就是 Positional Encoding（位置编码）。
-
-### 5.1 最初版本采用正弦和余弦函数
-
-2017 年的原始 Transformer 使用固定的正弦、余弦函数构造位置编码。
-
-公式如下：
-
-$$
-\text{PE}_{(p,2i)}=\sin\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right),\qquad \text{PE}_{(p,2i+1)}=\cos\!\left(\frac{p}{10000^{2i/d_{\text{model}}}}\right)
-$$
-
-其中：
-
-- $p$：Token 在序列中的位置。
-- $i$：向量维度对应的索引（$2i$ 与 $2i+1$ 为一对）。
-- $d_{\text{model}}$：模型隐藏维度。
-
-偶数维使用 Sin，奇数维使用 Cos。
-
-### 5.2 为什么使用不同频率？
-
-观察公式：
-
-$$
-10000^{2i/d_{\text{model}}}
-$$
-
-随着维度索引 $i$ 增大，分母也会增大。
-
-因此，不同维度对应不同频率的正弦、余弦函数。
-
-低维度变化较快，高维度变化较慢。
-
-这样，每个位置都可以通过一组不同频率的周期函数表示。
-
-不同位置对应不同的位置编码向量。
-
-### 5.3 位置编码如何加入 Token？
-
-假设 Token Embedding 为：
-
-$$
-E_{\text{token}}\in\mathbb{R}^{n\times d_{\text{model}}}
-$$
-
-位置编码为：
-
-$$
-\text{PE}\in\mathbb{R}^{n\times d_{\text{model}}}
-$$
-
-Transformer 直接将二者相加：
-
-$$
-X_{\text{input}}=E_{\text{token}}+\text{PE}
-$$
-
-这里不是拼接，而是逐元素相加。
-
-这样，输入向量同时包含：
-
-1. Token 的语义信息。
-2. Token 的位置信息。
-
-原始论文还将 Embedding 乘以 $\sqrt{d_{\text{model}}}$。
-
-因此，更完整的输入形式为：
-
-$$
-X_{\text{input}}=\sqrt{d_{\text{model}}}\,E_{\text{token}}+\text{PE}
-$$
-
-![不同频率的位置编码与 Token 表示相加](images/transform/raster/10-positional-encoding.png)
-
-图中的 $E(p)$ 表示经过缩放的 Token Embedding，$X(p)$ 是它与位置向量逐元素相加后的输入。
-
----
-
-## 六、Feed Forward Network：前馈神经网络
-
-现在我们已经理解了：
-
-- Attention：让 Token 获取其他 Token 的信息。
-- Multi-Head Attention：从多个表示子空间学习不同的关联。
-- Positional Encoding：告诉模型 Token 的位置。
-
-但是，Transformer 还需要一个模块对每个 Token 的特征进行进一步加工。
-
-这就是 Feed Forward Network，简称 FFN。
-
-### 6.1 FFN 的结构
+### 5.2 Attention 之后，FFN 怎样加工每个位置？
 
 原始 Transformer 使用一个两层全连接神经网络：
 
@@ -543,6 +366,8 @@ $$
 \text{ReLU}(a)=\max(0,a)
 $$
 
+ReLU 把负值截为 0，引入非线性。如果中间没有这样的激活函数，两次线性变换可以合并成一次，FFN 就难以表达更复杂的特征组合。Attention 负责跨位置取信息，FFN 则在每个位置内部加工取回后的特征。
+
 在 Base 模型中：
 
 $$
@@ -558,7 +383,7 @@ $$
 x\rightarrow xW_1+b_1\rightarrow\text{ReLU}\rightarrow\text{ReLU}(xW_1+b_1)W_2+b_2
 $$
 
-### 6.2 为什么要先升维，再降维？
+#### 为什么先升维，再降维？
 
 可以理解为：
 
@@ -574,18 +399,9 @@ FFN 是逐位置独立计算的。
 
 Token 之间的信息交互主要发生在 Attention 模块中。
 
-![FFN 对各位置独立应用相同参数，并先升维后降维](images/transform/raster/11-ffn.png)
 
----
 
-## 七、Residual Connection 和 Layer Normalization
-
-原始 Transformer 中，每个子层外面都有两个重要结构：
-
-1. Residual Connection（残差连接）
-2. Layer Normalization（层归一化）
-
-### 7.1 残差连接
+### 5.3 为什么每个子层后都有 Add & Norm？
 
 假设输入为 $x$，经过某个神经网络子层得到 $F(x)$。
 
@@ -611,9 +427,13 @@ $$
 
 其中的直接梯度通路有助于缓解深层网络训练中的梯度传播问题。
 
-### 7.2 Layer Normalization
+这条等式只描述**残差相加**本身。原始 Transformer 随后还要执行 LayerNorm，因此不能把整个 Post-LN 子层的梯度都当成严格的恒等映射。残差提供旁路，使子层更容易在原表示上学习增量，而不是每层都从头重建全部信息。
 
-LayerNorm 的作用是对特征维度进行归一化。
+#### LayerNorm 怎样控制尺度？
+
+LayerNorm 的作用是对特征维度进行归一化。层数增加时，各子层的输出不断参与残差相加，传给下一层的数值范围可能变化；如果某些特征尺度特别大，后续计算就可能被它们主导。Norm 给每个位置的特征提供相对稳定的尺度，同时保留通过参数重新缩放的能力。
+
+这里按**一个 Token 的特征维度**计算统计量，不把句子里不同位置或一个 batch 中不同样本混在一起。这样做能控制子层传往下一层的数值尺度；后面的可训练缩放与偏移又允许模型选择适合任务的范围。
 
 假设某个 Token 的向量为：
 
@@ -651,7 +471,7 @@ $$
 - $\beta$：可学习的偏移参数。
 - $\varepsilon$：数值稳定项。
 
-### 7.3 原始 Transformer 的 Add & Norm
+#### 原始版本的顺序：先加后归一化
 
 这里有一个很重要的历史细节：
 
@@ -663,11 +483,9 @@ $$
 \text{AddNorm}(x,\text{Sublayer})=\text{LayerNorm}\!\left(x+\text{Sublayer}(x)\right)
 $$
 
-这条式子只保留主干顺序。按[原论文](https://arxiv.org/pdf/1706.03762)的训练配置，子层输出在与输入相加之前还会经过 Dropout；Encoder 和 Decoder 底部的 Embedding 与位置编码相加后也使用 Dropout。推理时 Dropout 关闭，后文的结构公式同样省略它。
+这里先看计算顺序；训练时的 Dropout 位置见附录。图中也省略了 Dropout。
 
-这个公式在原始 Transformer 中非常重要。
-
-![原始 Transformer 中先残差相加、再层归一化的 Post-LN 顺序](images/transform/raster/12-residual-layernorm.png)
+![原始 Transformer 中先残差相加、再层归一化的 Post-LN 顺序](images/transform/article-v2/09-post-ln.png)
 
 例如，Encoder 的一个 Layer 包含两个子层：
 
@@ -693,327 +511,137 @@ $$
 
 但这属于后续架构的演变，不应该与原始版本混淆。
 
----
+因此，若 $X\in\mathbb R^{n\times d_{\text{model}}}$ 是某层 Encoder 的输入，它先经自注意力得到 $a=\text{LayerNorm}(X+\text{MultiHead}(X))$，再经 FFN 得到 $Y=\text{LayerNorm}(a+\text{FFN}(a))$。一层的输入输出形状相同；六层堆叠后形成供 Decoder 读取的 $E\in\mathbb R^{n\times d_{\text{model}}}$。
 
-## 八、完整理解原始 Transformer 架构
+### 5.4 Decoder：目标前缀先自读，再读取源句
 
-前面已经拆解了 Transformer 的基本组件，现在可以将它们组合起来。
+Decoder 的输入来自已经生成的目标前缀。它每层有三类子层，按顺序是**因果自注意力 → 交叉注意力 → FFN**，每个子层后都执行前面介绍的残差相加与 LayerNorm。
 
-原始 Transformer 采用 Encoder-Decoder 架构。
-
-整体包含两个部分：
-
-- Encoder：编码器，负责理解输入序列。
-- Decoder：解码器，负责生成目标序列。
-
-原始论文的 Base 模型中 $N=6$，也就是说，Encoder 和 Decoder 都分别堆叠 6 层。
-
-![原始 Transformer 的 Encoder–Decoder 总体结构](images/transform/raster/13-encoder-decoder.png)
-
-图中的青绿色连线表示：交叉注意力的 Key 和 Value 来自 Encoder 输出，Query 来自 Decoder 当前状态。
-
-### 8.1 Encoder 的结构
-
-每一层 Encoder 包含两个子层。
-
-**第一个子层：Multi-Head Self-Attention**
-
-输入序列中的每个 Token 都可以关注当前输入序列中的其他 Token。
-
-这里：
+**第一步，因果自注意力。** 假设我们正用 `<BOS> I put the` 预测 `apple`。Decoder 可以读取这些已经出现的目标 Token，不能看到未来的 `apple`、`fridge`。训练时虽然完整译文已知，也必须遮住右侧未来位置，才能让训练任务与逐词生成保持一致。对第 $i$ 行（当前目标位置）和第 $j$ 列（可读取位置），加性掩码是：
 
 $$
-Q=XW^Q,\qquad K=XW^K,\qquad V=XW^V
+M_{ij}=\begin{cases}0,&j\leq i,\\-\infty,&j>i,\end{cases}
+\qquad
+\mathrm{MaskedAttention}(Q,K,V)=\mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
 $$
 
-因为 Q、K、V 都来自同一个输入序列，所以叫 Self-Attention。
+例如三个目标位置的可见矩阵为：
 
-计算：
-
-$$
-M=\text{MultiHead}(X)
-$$
-
-然后残差连接和归一化：
-
-$$
-A=\text{LayerNorm}(X+M)
-$$
-
-**第二个子层：Feed Forward Network**
-
-$$
-F=\text{FFN}(A)
-$$
-
-然后：
-
-$$
-Y=\text{LayerNorm}(A+F)
-$$
-
-因此，一个 Encoder Layer 可以总结为：
-
-$$
-X\rightarrow\text{MultiHeadSelfAttention}\rightarrow\text{AddNorm}\rightarrow\text{FFN}\rightarrow\text{AddNorm}
-$$
-
-其中：
-
-$$
-X\in\mathbb{R}^{n\times d_{\text{model}}},\qquad Y\in\mathbb{R}^{n\times d_{\text{model}}}
-$$
-
-6 层 Encoder 依次堆叠，最终输出 $E$，其中：
-
-$$
-E\in\mathbb{R}^{n\times d_{\text{model}}}
-$$
-
-### 8.2 Decoder 的结构
-
-Decoder 比 Encoder 多一个子层。
-
-每一层 Decoder 包含三个子层：
-
-1. Masked Multi-Head Self-Attention
-2. Encoder-Decoder Attention
-3. Feed Forward Network
-
-#### 第一个子层：Masked Self-Attention
-
-Decoder 的任务是逐个生成目标 Token。
-
-假设正在生成：
-
-> I love machine learning
-
-当模型预测第 3 个 Token 时，只允许使用前面已经生成的 Token，而不能提前看到第 4 个 Token。
-
-因此需要引入 Mask。
-
-原始 Transformer 使用的是因果掩码（Causal Mask）。
-
-数学上：
-
-$$
-M_{ij}=\begin{cases}0,&j\leq i,\\-\infty,&j>i,\end{cases}\qquad \text{MaskedAttention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
-$$
-
-其中：
-
-- $M_{ij}$ 为第 $i$ 个位置对第 $j$ 个位置的加性掩码；$j>i$ 表示未来位置。
-
-这样，未来位置对应的注意力分数经过 Softmax 后就变成 0。
-
-例如，序列长度为 3：
-
-~~~text
-可见位置（1 表示可见）：
+```text
+行＝当前目标位置；列＝可读取的目标位置
 1 0 0
 1 1 0
 1 1 1
-~~~
+```
 
-因此：
-
-- 第一个 Token 只能关注第一个位置。
-- 第二个 Token 可以关注前两个位置。
-- 第三个 Token 可以关注前三个位置。
-
-这保证了生成过程的因果性。
-
-#### 第二个子层：Encoder-Decoder Attention
-
-这个模块也叫 Cross-Attention（交叉注意力）。
-
-它负责让 Decoder 获取 Encoder 对输入序列的理解结果。
-
-与 Self-Attention 不同，这里：
+**第二步，交叉注意力。** 经过因果自注意力后，Decoder 当前状态作为 Q；Encoder 的源句输出提供 K 和 V：
 
 $$
 Q=DW^Q,\qquad K=EW^K,\qquad V=EW^V
 $$
 
-其中：
+$D$ 表示 Decoder 当前状态，$E$ 表示 Encoder 输出。若 Decoder 有 $m$ 个目标位置、Encoder 有 $n$ 个源位置，则单个头的 $QK^\top$ 是 $m\times n$，每一行是一个目标位置对所有源位置的匹配分数。预测 `apple` 时，某些头**可能**较多读取源句「苹果」附近的信息；预测 `fridge` 时，读取「冰箱」附近的信息可能更有用。这不是强制的词对词对齐，也不能拿单个头的权重当作完整解释。交叉注意力让目标侧每个位置有机会读取**全部源句位置**，与目标侧因果掩码的限制不同。
 
-- $D$：Decoder 当前的隐藏状态。
-- $E$：Encoder 输出。
+**第三步，FFN。** 交叉注意力已经把可用源句信息汇入目标表示，FFN 再逐位置加工特征。六层 Decoder 依次堆叠后，最后一层的输出才用于词表预测。
 
-也就是说：
-
-Query 来自 Decoder。
-
-Key 和 Value 来自 Encoder。
-
-计算：
+把每层的三次 Post-LN 写在一起，可核对信息顺序：
 
 $$
-\text{CrossAttention}(D,E)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
-$$
-
-然后执行残差连接和 LayerNorm。
-
-这一步让 Decoder 在生成每一个 Token 时，都可以从输入序列中获取相关信息。
-
-![因果自注意力的可见范围与交叉注意力的信息来源](images/transform/raster/14-masked-cross-attention.png)
-
-#### 第三个子层：Feed Forward Network
-
-最后仍然使用与 Encoder 相同形式的 FFN：
-
-$$
-F=\text{FFN}(C)
-$$
-
-并执行：
-
-$$
-D_{\text{out}}=\text{LayerNorm}(C+F)
-$$
-
-因此，一个 Decoder Layer 可以概括为：
-
-$$
-U=\text{LayerNorm}(D+\text{MaskedMultiHead}(D))
-$$
-
-$$
-C=\text{LayerNorm}(U+\text{MultiHeadCross}(U,E))
-$$
-
-$$
+U=\text{LayerNorm}(D+\text{MaskedMultiHead}(D)),\quad
+C=\text{LayerNorm}(U+\text{MultiHeadCross}(U,E)),\quad
 D_{\text{out}}=\text{LayerNorm}(C+\text{FFN}(C))
 $$
 
-6 层 Decoder 依次堆叠，得到最终的解码结果。
+这里 $E$ 在 Decoder 各层都来自**最后一层 Encoder 的输出**，并不是随着 Decoder 层数同步改变的另一串目标状态。训练时的 Dropout 省略在式子外，详见附录。
 
----
+## 六、模型怎样生成和训练？
 
-## 九、Transformer 如何生成最终结果？
+### 6.1 推理：一个词接着一个词
 
-现在，Encoder 和 Decoder 都已经介绍完毕。
-
-还需要解决最后一个问题：
-
-模型如何根据 Decoder 的输出预测下一个 Token？
-
-假设 Decoder 最终输出：
+沿着第一节的例子，给定源句和目标前缀 `<BOS> I put the`，Decoder 最后一个位置的表示经过线性层得到词表分数，再由 Softmax 转成各候选 Token 的概率：
 
 $$
-D_{\text{final}}\in\mathbb{R}^{m\times d_{\text{model}}}
-$$
-
-首先经过一个线性映射：
-
-$$
-L=D_{\text{final}}W_{\text{vocab}}+b_{\text{vocab}}
-$$
-
-其中：
-
-$$
-W_{\text{vocab}}\in\mathbb{R}^{d_{\text{model}}\times|\mathcal V|}
-$$
-
-这里用 $W_{\text{vocab}}$ 单独标记输出投影这一步，并不表示原论文一定另存一套独立参数。原论文在共享词表下让源端 Embedding、目标端 Embedding 与 Softmax 前的线性投影**共享同一权重矩阵**；按本文行向量记法，输出投影使用 Embedding 权重的转置。原论文还将 Embedding 向量乘以 $\sqrt{d_{\text{model}}}$。这些实现细节不改变“Decoder 输出 → 词表分数 → Softmax”的主线。
-
-$|\mathcal V|$ 表示词表大小。
-
-因此：
-
-$$
-L\in\mathbb{R}^{m\times|\mathcal V|}
-$$
-
-每个位置都得到一个长度为 $|\mathcal V|$ 的分数向量。
-
-然后经过 Softmax：
-
-$$
+L=D_{\text{final}}W_{\text{vocab}}+b_{\text{vocab}},\qquad
 P(y_i=w\mid y_{<i},x)=\frac{\exp(L_{i,w})}{\sum_{u\in\mathcal V}\exp(L_{i,u})}
 $$
 
-最终得到词表中每个 Token 的预测概率。
+这里 $x$ 是源句，$y_{<i}$ 是已生成的目标前缀，$|\mathcal V|$ 是词表大小。若这一步选出 `apple`，下一步的前缀就变成 `<BOS> I put the apple`，再预测 `in`。实际解码未必每次都简单选概率最大的词；原论文的解码策略和输出投影权重共享细节放在附录。
 
-例如：
+如果 Decoder 共处理 $m$ 个目标位置，则 $D_{\text{final}}\in\mathbb R^{m\times d_{\text{model}}}$，$W_{\text{vocab}}\in\mathbb R^{d_{\text{model}}\times|\mathcal V|}$，所以词表分数 $L\in\mathbb R^{m\times|\mathcal V|}$。推理时只取**当前最后一个位置**的分布来决定下一 Token。
 
-| Token   | 概率 |
-| ------- | ---: |
-| machine | 0.70 |
-| deep    | 0.20 |
-| neural  | 0.10 |
+### 6.2 训练：已知译文，怎样练习预测下一个词？
 
-模型可以选择概率最高的 Token，也可以采用其他解码策略。
+训练样本已经给出完整目标句。为了与推理时的任务一致，Decoder 输入使用**右移一位**的真实目标序列，输出位置逐个预测原目标。为了看清对齐，下面先省略句号和结束标记：
 
-在原始机器翻译任务中，通常使用 Beam Search 等方法生成完整序列。
+| 位置 | 1 | 2 | 3 | 4 | 5 | 6 | 7 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Decoder 输入 | `<BOS>` | `I` | `put` | `the` | `apple` | `in` | `the` |
+| 预测目标 | `I` | `put` | `the` | `apple` | `in` | `the` | `fridge` |
 
----
+![右移目标序列与逐位置预测的对齐](images/transform/article-v2/10-teacher-forcing.png)
 
-## 十、Transformer 是如何训练的？
+第 4 列正是“已有 `<BOS> I put the`，预测 `apple`”。训练时各列可以并行计算，但因果掩码保证第 4 列不能读取后面的正确答案。把预测概率与真实目标比较，常用的负对数似然写成：
 
-原始 Transformer 主要通过机器翻译任务进行验证。
-
-假设输入：
-
-> 我喜欢人工智能
-
-目标输出：
-
-> I love artificial intelligence
-
-训练时，Decoder 使用右移后的目标序列作为输入。
-
-例如：
-
-Decoder 输入：
-
-~~~text
-<BOS> I love artificial
-~~~
-
-预测目标：
-
-~~~text
-I love artificial intelligence
-~~~
-
-这里 BOS 表示序列开始标记。
-
-这种训练方式叫 Teacher Forcing。
-
-模型在每个位置预测下一个 Token，并将预测结果与真实 Token 进行比较。
-
-![Teacher Forcing 中右移的目标输入与逐位置损失](images/transform/raster/15-teacher-forcing.png)
-
-### 10.1 Cross Entropy Loss
-
-假设真实 Token 的概率为 $p_{\text{true}}$，交叉熵损失为：
+这种用真实目标前缀作为 Decoder 输入的训练方式常称为 **Teacher Forcing**。推理时拿不到未来的真实目标，只能把已生成的词接回前缀，所以两种过程的输入来源要分清。
 
 $$
-\ell_i=-\log p_{\text{true}}
+\mathcal L_{\mathrm{NLL}}=-\sum_{i=1}^{T}\log P_\theta(y_i\mid y_{<i},x)
 $$
 
-如果模型给正确 Token 分配的概率越高，损失越小。
+原论文还使用标签平滑，训练优化器和学习率调度见附录。图中只展示右移与对齐，不把训练画成一次只算一个位置。
 
-对于整个序列：
+## 七、回看整条路线
 
-$$
-\mathcal L_{\text{NLL}}=-\sum_{i=1}^{T}\log P_\theta(y_i\mid y_{<i},x)
-$$
+从源句开始，Token 先变成带位置的向量；Encoder 的自注意力让源句位置交换信息。Decoder 读已知目标前缀，因果掩码挡住未来，再用交叉注意力读取 Encoder 输出。经过 FFN、残差和 LayerNorm 的层层加工，最后一层 Decoder 的表示变成下一个 Token 的概率。
 
-其中：
+第一次阅读只需抓住四个计算关系；它们的含义和适用位置已在前文展开：
 
-- $x$：输入序列。
-- $y_i$：第 $i$ 个真实目标 Token。
-- $y_{<i}$：之前已经出现的目标 Token。
-- $T$：目标序列长度。
+| 关系 | 作用 |
+| :--- | :--- |
+| $Q=XW^Q,\ K=XW^K,\ V=XW^V$ | 生成匹配用的 Q/K 与被读取的 V |
+| $\mathrm{Attention}(Q,K,V)=\mathrm{softmax}(QK^\top/\sqrt{d_k})V$ | 缩放、归一化并汇总信息 |
+| $\mathrm{MultiHead}=\mathrm{Concat}(\mathrm{head}_1,\ldots,\mathrm{head}_h)W^O$ | 多个头分别读取后再汇合 |
+| $\mathrm{MaskedAttention}=\mathrm{softmax}(QK^\top/\sqrt{d_k}+M)V$ | Decoder 遮住未来目标位置 |
 
-训练的目标就是不断调整模型参数，最小化整个训练数据集上的损失。
+这套结构让同一层中的许多位置可并行处理，也让远处位置通过注意力建立直接联系。代价是标准全局注意力要处理大量位置对；推理生成仍须等前一个目标 Token 确定后才能写下一个。后来的模型在注意力头、位置规则、归一化、缓存等方面继续做取舍，见[架构演进系列](从原始Transformer到现代大模型：逐项理解架构演进.md)。
 
-这里给出的是基础的负对数似然形式。原始论文训练时还使用了标签平滑（label smoothing，系数为 $0.1$），让目标分布不再是完全独热的形式。
+## 附录：原论文配置与实现细节
 
-### 10.2 原始 Transformer 使用什么优化器？
+以下细节适合在理解主线后回查，不改变前面 Encoder–Decoder 的信息路径。
+
+### Base 与 Big 配置
+
+为了完整理解 2017 年的原始 Transformer，需要记住论文中的两个典型配置：
+
+| 参数              | Base |  Big |
+| ----------------- | ---: | ---: |
+| Encoder 层数      |    6 |    6 |
+| Decoder 层数      |    6 |    6 |
+| $d_{\text{model}}$ | 512 | 1024 |
+| Attention Head 数 |    8 |   16 |
+| $d_k$ | 64 | 64 |
+| $d_v$ | 64 | 64 |
+| $d_{\text{ff}}$ | 2048 | 4096 |
+| Dropout           |  0.1 |  0.3 |
+| Warmup Steps      | 4000 | 4000 |
+
+这里需要特别注意：
+
+原始 Transformer 的 Big 模型中 $d_k=d_v=64$，并不是简单地将每个头的维度扩大到 128。
+
+由于 Head 数从 8 增加到 16，最终拼接后的维度才达到 1024（即 $16\times64$）。
+
+表中 Big 的 Dropout $0.3$ 是论文主配置；原论文的英语到法语 Big 实验改用 $0.1$。具体实验配置要和任务一起读。
+
+### Dropout、权重共享与标签平滑
+
+主文的 Post-LN 公式写作 $\mathrm{LayerNorm}(x+\mathrm{Sublayer}(x))$，省略了训练时的 Dropout。[原论文](https://arxiv.org/pdf/1706.03762)在**子层输出与输入相加之前**使用 Dropout，并在 Encoder、Decoder 底部的 Embedding 与位置编码之和上使用 Dropout；推理时关闭 Dropout。
+
+输出投影 $W_{\text{vocab}}$ 只是标记运算，并不表示另存一套独立权重。原论文在共享词表设置下共享源端 Embedding、目标端 Embedding 和 Softmax 前线性层的权重；按本文行向量记法，输出投影对应 Embedding 权重的转置。Embedding 还乘以 $\sqrt{d_{\text{model}}}$。训练目标除了前面的负对数似然，还采用系数为 $0.1$ 的标签平滑。
+
+原论文在机器翻译推理时采用 Beam Search 来比较多个候选序列，而不是让每一步都独立地只取当前最高概率 Token。这属于解码策略，不改变图中 Encoder 与 Decoder 的连接方式。
+
+### Adam 与学习率日程
 
 原始论文使用 Adam 优化器，并设计了特殊的学习率调度策略：
 
@@ -1040,7 +668,6 @@ $$
 随着训练步数增加，学习率逐渐增大。
 
 **第二阶段：Decay**
-
 $$
 \text{lr}(s)=d_{\text{model}}^{-1/2}s^{-1/2}\qquad(s\geq w)
 $$
@@ -1048,113 +675,3 @@ $$
 达到预热阶段后，学习率逐渐衰减。
 
 这样可以帮助模型在训练初期保持稳定，同时在后期逐渐优化参数。
-
----
-
-## 十一、原始 Transformer 的核心参数总结
-
-为了完整理解 2017 年的原始 Transformer，需要记住论文中的两个典型配置：
-
-| 参数              | Base |  Big |
-| ----------------- | ---: | ---: |
-| Encoder 层数      |    6 |    6 |
-| Decoder 层数      |    6 |    6 |
-| $d_{\text{model}}$ | 512 | 1024 |
-| Attention Head 数 |    8 |   16 |
-| $d_k$ | 64 | 64 |
-| $d_v$ | 64 | 64 |
-| $d_{\text{ff}}$ | 2048 | 4096 |
-| Dropout           |  0.1 |  0.3 |
-| Warmup Steps      | 4000 | 4000 |
-
-这里需要特别注意：
-
-原始 Transformer 的 Big 模型中 $d_k=d_v=64$，并不是简单地将每个头的维度扩大到 128。
-
-由于 Head 数从 8 增加到 16，最终拼接后的维度才达到 1024（即 $16\times64$）。
-
----
-
-## 十二、为什么 Transformer 能够改变深度学习？
-
-回到最初的问题：
-
-Transformer 为什么能够取代很多传统序列模型，成为现代大语言模型的重要基础？
-
-主要有三个原因。
-
-**第一，Attention 建立了直接的全局信息交互机制。**
-
-RNN 需要通过连续的隐藏状态传递信息，而 Transformer 可以让任意两个位置直接建立注意力联系。
-
-在标准全局 Self-Attention 中，序列长度为 $n$ 时，注意力矩阵大小为 $n\times n$。
-
-因此，每一层都可以直接计算任意两个 Token 之间的关联。
-
-**第二，计算过程更容易并行化。**
-
-对于 Encoder，所有输入 Token 的 Q、K、V 可以通过矩阵运算同时计算。
-
-这充分利用了 GPU 的并行计算能力。
-
-**第三，模型具有良好的扩展能力。**
-
-通过增加层数、隐藏维度、注意力头数量和训练数据规模，可以构建更大规模的模型。
-
-后续的 GPT、BERT 等模型都从 Transformer 架构中发展而来，但它们在 Encoder、Decoder、训练目标和注意力结构等方面存在明显区别。
-
----
-
-## 十三、流程图与公式速查
-
-读完各个模块，再回到开篇的翻译任务，把两条输入路线合起来：
-
-```text
-源句 → Encoder（自注意力 → FFN） → Encoder 输出 ── K/V ──┐
-                                                        ↓
-目标前缀 → Decoder 因果自注意力 ── Q ─────────────→ 交叉注意力 → FFN → 线性投影 → Softmax → 下一个 Token
-```
-
-每个注意力或 FFN 子层周围都有残差连接与 Post-LN；Base 配置的 Encoder 和 Decoder 各重复 6 层。这个简图只标数据来源和主要运算，训练时的 Dropout 与位置编码已在前文交代。下面几式用来核对关键计算，推导仍以对应章节为准。
-
-**1. Q、K、V 的线性映射**
-
-$$
-Q=XW^Q,\qquad K=XW^K,\qquad V=XW^V
-$$
-
-**2. Scaled Dot-Product Attention**
-
-$$
-\text{Attention}(Q,K,V)=\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V
-$$
-
-**3. Multi-Head Attention**
-
-$$
-\text{MultiHead}(X)=\text{Concat}(\text{head}_1,\ldots,\text{head}_h)W^O
-$$
-
-**4. Feed Forward Network**
-
-$$
-\text{FFN}(x)=\max(0,xW_1+b_1)W_2+b_2
-$$
-
-**5. 原始 Transformer 的 Add & Norm（此处省略训练时的 Dropout）**
-
-$$
-\text{LayerNorm}(x+\text{Sublayer}(x))
-$$
-
-**6. Decoder 的 Masked Attention**
-
-$$
-\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}+M\right)V
-$$
-
-其中 $M$ 在未来位置为负无穷，在允许读取的位置为 0。位置编码的正弦、余弦公式和训练目标分别见第五节、第十节。
-
-**Transformer 最核心的创新，不是某一个独立的公式，而是以 Attention 为核心，构建了一套能够并行计算、建立全局依赖关系并且易于扩展的序列建模架构。**
-
-想继续理解这些模块在后来的模型中如何变化，可接着阅读[从原始 Transformer 到现代大模型：逐项理解架构演进](从原始Transformer到现代大模型：逐项理解架构演进.md)。
