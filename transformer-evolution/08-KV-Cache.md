@@ -1,4 +1,4 @@
-# KV Cache：为什么生成时要留下历史 K/V？
+# 生成下一词，为什么要记住过去？从重复计算理解 KV Cache
 
 > [返回总览](../从原始Transformer到现代大模型：逐项理解架构演进.md)｜以[原始 Transformer 笔记](../transform.md)为基线。
 

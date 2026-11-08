@@ -1,4 +1,4 @@
-# MLA：从多组完整 KV 到共享低维底稿
+# 历史信息一定要存成完整的 K/V 吗？理解 MLA 的低维底稿
 
 > [返回总览](../从原始Transformer到现代大模型：逐项理解架构演进.md)｜以[原始 Transformer 笔记](../transform.md)为基线。
 

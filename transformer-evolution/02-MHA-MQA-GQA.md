@@ -1,4 +1,4 @@
-# MHA、MQA、GQA：为什么要共享历史 KV？
+# 生成越久，历史 KV 为什么越占显存？从 MHA 到 MQA、GQA
 
 > [返回总览](../从原始Transformer到现代大模型：逐项理解架构演进.md)｜以[原始 Transformer 笔记](../transform.md)为基线。
 

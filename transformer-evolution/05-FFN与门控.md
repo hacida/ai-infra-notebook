@@ -1,4 +1,4 @@
-# FFN 与门控：从 ReLU、GELU 到 SwiGLU
+# 读完上下文，每个 Token 还要怎样加工信息？从 FFN 到门控
 
 > [返回总览](../从原始Transformer到现代大模型：逐项理解架构演进.md)｜以[原始 Transformer 笔记](../transform.md)为基线。
 

@@ -1,4 +1,4 @@
-# MoE：为什么把一套 FFN 变成多套 Expert？
+# 模型参数变多，每个 Token 都要全部计算吗？理解 MoE 的专家选择
 
 > [返回总览](../从原始Transformer到现代大模型：逐项理解架构演进.md)｜以[原始 Transformer 笔记](../transform.md)为基线。
 
